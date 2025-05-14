@@ -16,7 +16,9 @@ from key_fields_loader import load_conference_key_fields, get_available_conferen
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-CONFERENCES = [name for name in os.listdir('../') if os.path.isdir(os.path.join('../', name)) and name != 'tools' and not name.startswith('.')]
+PROJECT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+CONFERENCES = [name for name in os.listdir(PROJECT_DIR) if os.path.isdir(os.path.join(PROJECT_DIR, name)) and name != 'tools' and not name.startswith('.')]
 
 DATA_SEARCH_MODES = ["All Papers", "Conference(s)"]
 
@@ -32,12 +34,10 @@ def load_conference_data(conference_name: str) -> Optional[List[Dict[str, Any]]]
     Returns:
         Optional[List[Dict[str, Any]]]: Conference data if successful, None otherwise
     """
-    # Base directories to search
-    base_dir = "../"
     
     # Find directory containing conference data
     conf_dir = None
-    possible_dir = os.path.join(base_dir, conference_name)
+    possible_dir = os.path.join(PROJECT_DIR, conference_name)
     if os.path.isdir(possible_dir):
         conf_dir = possible_dir
     
