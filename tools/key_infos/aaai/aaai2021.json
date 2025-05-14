@@ -1,0 +1,39 @@
+{
+    "track": [
+        "AAAI Technical Track Focus Area",
+        "main"
+    ],
+    "status": [
+        "Technical"
+    ],
+    "primary_area": [
+        "AI Responses to the COVID-19 Pandemic",
+        "AI for Conference Organization and Delivery",
+        "Application Domains",
+        "Cognitive Modeling and Cognitive Systems",
+        "Computer Vision I",
+        "Computer Vision II",
+        "Computer Vision III",
+        "Constraint Satisfaction and Optimization",
+        "Data Mining and Knowledge Management",
+        "Game Theory and Economic Paradigms",
+        "Human-Computation and Crowd Sourcing",
+        "Humans and AI",
+        "Intelligent Robots",
+        "Knowledge Representation and Reasoning",
+        "Machine Learning I",
+        "Machine Learning II",
+        "Machine Learning III",
+        "Machine Learning IV",
+        "Machine Learning V",
+        "Multiagent Systems",
+        "Neuro-Symbolic AI",
+        "Philosophy and Ethics of AI",
+        "Planning, Routing, and Scheduling",
+        "Reasoning under Uncertainty",
+        "Search and Optimization",
+        "Speech and Natural Language Processing I",
+        "Speech and Natural Language Processing II",
+        "Speech and Natural Language Processing III"
+    ]
+}

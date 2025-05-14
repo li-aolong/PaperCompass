@@ -1,0 +1,48 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "Being Discrete About Geometry Processing",
+        "Clever Solids",
+        "Color & Compositing",
+        "Comparing 3D Shapes and Parts",
+        "Computational Cameras & Displays",
+        "Deep Image Processing",
+        "Dynamic Fabrication",
+        "Fabricating Curves, Surfaces & Volumes",
+        "Fabricating Look & Feel",
+        "Faces & Hair",
+        "Fluid Control & Synthesis",
+        "Fluids II",
+        "Fluids III",
+        "Get More Out of Your Photo",
+        "Global Parameterization",
+        "Human Motion",
+        "Image Texture & Completion",
+        "Image and Light Field Manipulation",
+        "Imaginative Imaging",
+        "Learning & Analysis for Geometry",
+        "Learning to Move",
+        "Let's Get in Contact",
+        "Mappings and Deformations",
+        "Meshing",
+        "People Power",
+        "Random Sampling",
+        "Reconstructing 3D Surfaces From Points, Lines, Images & Water",
+        "Reflectance & Scattering",
+        "Rendering Systems",
+        "Rendering Volumes",
+        "Rendering in Path Space",
+        "Simulation for Virtual Worlds",
+        "Sketching & Curves",
+        "Sound & Elastics",
+        "Speech and Facial Animation",
+        "Time to Focus",
+        "Video",
+        "Work it, Make it Better, Stronger"
+    ]
+}

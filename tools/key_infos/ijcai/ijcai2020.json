@@ -1,0 +1,26 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Poster"
+    ],
+    "primary_area": [
+        "",
+        "AI Ethics",
+        "Agent-based and Multi-agent Systems",
+        "Computer Vision",
+        "Constraints and SAT",
+        "Data Mining",
+        "Heuristic Search and Game Playing",
+        "Humans and AI",
+        "Knowledge Representation and Reasoning",
+        "Machine Learning",
+        "Machine Learning Applications",
+        "Multidisciplinary Topics and Applications",
+        "Natural Language Processing",
+        "Planning and Scheduling",
+        "Robotics",
+        "Uncertainty in AI"
+    ]
+}

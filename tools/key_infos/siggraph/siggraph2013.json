@@ -1,0 +1,46 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "3D Printing",
+        "Advanced Rendering",
+        "Appearance Fabrication",
+        "Artistic Rendering & Stylization",
+        "Building Structures & Layouts",
+        "Color & Compositing",
+        "Computational Light Capture",
+        "Data-Driven Animation",
+        "Deformation & Distortion",
+        "Design & Authoring",
+        "Display Hardware",
+        "Faces & Hands",
+        "Fluid Grids & Meshes",
+        "Geometry & Topology",
+        "Global Illumination",
+        "Hardware Rendering",
+        "Image-Based Reconstruction",
+        "Laplacians, Light Field & Layouts",
+        "Line Drawing",
+        "Materials",
+        "Perception",
+        "Points",
+        "Precomputed Rendering",
+        "Quads & Meshing",
+        "Rods & Shells",
+        "Sampling",
+        "Shape Analysis",
+        "Skinning & Deformation",
+        "Sounds & Solids",
+        "Structures, Faces & Building",
+        "Surface Modeling",
+        "Surface Reconstruction",
+        "Surfaces & Differential Geometry",
+        "Video & Warping",
+        "Voxels & Liquids",
+        "Water & Snow With Particles"
+    ]
+}

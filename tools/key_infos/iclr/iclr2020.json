@@ -1,0 +1,16 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Desk Reject",
+        "Poster",
+        "Reject",
+        "Spotlight",
+        "Talk",
+        "Withdraw"
+    ],
+    "primary_area": [
+        ""
+    ]
+}

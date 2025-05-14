@@ -1,0 +1,18 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Oral",
+        "Poster"
+    ],
+    "award": [],
+    "session": [
+        "computational photography, face and gesture, and vision for x",
+        "optimization, segmentation, and recognition",
+        "recognition and 3d computer vision i",
+        "recognition and 3d computer vision ii",
+        "recognition, low-level vision, and biomedical image analysis",
+        "statistical methods and learning, motion and tracking, and video analysis i"
+    ]
+}

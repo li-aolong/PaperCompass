@@ -1,0 +1,43 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "3D Modeling",
+        "Appearance Capture & Image Processing",
+        "Architectural Patterns",
+        "Biped Control",
+        "Boundaries, Edges & Gradients",
+        "Cloth Animation",
+        "Collisions and Contact",
+        "Computational Photography",
+        "Displays and Eyes",
+        "Editing Motion",
+        "Elastic Models",
+        "Expressive Rendering & Illustrations",
+        "Fabrication",
+        "Faces & Capture",
+        "Fluids I",
+        "Fluids II",
+        "GPU Rendering",
+        "Geometry Algorithms & Sampling",
+        "Human Modeling",
+        "Image Enhancement",
+        "Lighting & Material Design",
+        "Meshing",
+        "Perception, Presence & Animation",
+        "Perceptual Rendering Methods",
+        "Physics-Based Sound & Bubbles",
+        "Planning & Terrain",
+        "Rendering Hair & Scattering",
+        "Stylized Rendering & Illusions",
+        "Surface Fields",
+        "Textures",
+        "Understanding Shape",
+        "Urban Reconstruction & Explanation",
+        "Video"
+    ]
+}

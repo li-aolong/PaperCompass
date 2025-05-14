@@ -1,0 +1,48 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "Camera Control & VR",
+        "Capturing Humans",
+        "Cloth",
+        "Computational Cameras",
+        "Computational Design of Structures, Shapes, and Sound",
+        "Computational Display",
+        "Correspondence & Mapping",
+        "Curve & Strut Networks for Fabrication",
+        "Deformable Surface Design",
+        "Display Software",
+        "Efficient Sampling & Rendering",
+        "Expressive Animation",
+        "Fabricating Structure & Appearance",
+        "Faces & Portraits",
+        "Fluids Simulation",
+        "Geometry ",
+        "Image & Shape Manipulation",
+        "Intrinsic Images",
+        "Mappings",
+        "Materials",
+        "Meshes",
+        "Meshes & Fields",
+        "Motion Control",
+        "Optimizing Image Processing",
+        "Perception of Shapes and People",
+        "Photo Organization & Manipulation",
+        "Physical Phenomena",
+        "Plants & Humans",
+        "Procedural Modeling",
+        "Rendering & Simulation with GPUs",
+        "Rendering of Complex Microstructure",
+        "Rigging & Skinning",
+        "Shape Analysis",
+        "Shape Signature",
+        "Sketching & Writing",
+        "Sound, Fluids & Boundaries",
+        "Texture",
+        "User Interfaces"
+    ]
+}

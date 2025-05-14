@@ -13,8 +13,8 @@ from typing import List, Dict, Tuple, Optional, Any, Callable
 # Constants
 SEARCH_MODE_AND = "AND"
 SEARCH_MODE_OR = "OR"
-EXCLUDED_STATUSES = ('Withdraw', 'Reject')
-DEFAULT_FIELDS = ["keywords", "title", "primary_area", "topic"]
+EXCLUDED_STATUSES = ('Withdraw', 'Reject', 'Desk Reject')
+DEFAULT_FIELDS = ["title", "abstract", "keywords", "primary_area"]
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

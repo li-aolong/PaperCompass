@@ -1,0 +1,30 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical"
+    ],
+    "primary_area": [
+        "Cognitive Modeling & Cognitive Systems",
+        "Computer Vision I",
+        "Computer Vision II",
+        "Computer Vision III",
+        "Constraint Satisfaction and Optimization",
+        "Data Mining and Knowledge Management",
+        "Domain(s) Of Application",
+        "Game Theory and Economic Paradigms",
+        "Humans and AI",
+        "Intelligent Robotics",
+        "Knowledge Representation and Reasoning",
+        "Machine Learning I",
+        "Machine Learning II",
+        "Machine Learning III",
+        "Multiagent Systems",
+        "Philosophy and Ethics of AI",
+        "Planning, Routing, and Scheduling",
+        "Reasoning under Uncertainty",
+        "Search and Optimization",
+        "Speech and Natural Language Processing"
+    ]
+}

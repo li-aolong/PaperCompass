@@ -1,0 +1,15 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Findings",
+        "Industry",
+        "Long",
+        "Short"
+    ],
+    "award": [
+        false,
+        true
+    ]
+}

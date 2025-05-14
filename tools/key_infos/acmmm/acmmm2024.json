@@ -1,0 +1,27 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Oral",
+        "Poster"
+    ],
+    "primary_area": [
+        "",
+        "[Content] Media Interpretation",
+        "[Content] Multimodal Fusion",
+        "[Content] Vision and Language",
+        "[Engagement] Emotional and Social Signals",
+        "[Engagement] Multimedia Search and Recommendation",
+        "[Engagement] Summarization, Analytics, and Storytelling",
+        "[Experience] Art and Culture",
+        "[Experience] Interactions and Quality of Experience",
+        "[Experience] Multimedia Applications",
+        "[Generation] Generative Multimedia",
+        "[Generation] Multimedia Foundation Models",
+        "[Generation] Social Aspects of Generative AI",
+        "[Systems] Data Systems Management and Indexing",
+        "[Systems] Systems and Middleware",
+        "[Systems] Transport and Delivery"
+    ]
+}

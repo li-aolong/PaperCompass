@@ -1,0 +1,33 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Poster",
+        "Technical Paper"
+    ],
+    "sess": [
+        "All About Sketches",
+        "Animation: Fluid",
+        "Animation: Fluids - Phenomenon",
+        "Animation: Pretty Solid Physics Research",
+        "Computational Holography",
+        "Computational Robotics",
+        "Differentiable Graphics",
+        "Digital Geometry Processing",
+        "Fabrication: Carving, Dicing, and Printing",
+        "Fabrication: Computational Design",
+        "Generation and Inference from Images",
+        "Hands and Faces",
+        "Image Synthesis with Generative Models",
+        "Learning New Viewpoints",
+        "Learning to Move and Synthesize",
+        "Light Transport: Methods",
+        "Light transport: Sampling",
+        "Meticulous Meshes",
+        "Modeling and Capturing Appearance",
+        "Neural Rendering",
+        "Shape Analysis",
+        "VR and Real-time Techniques"
+    ]
+}

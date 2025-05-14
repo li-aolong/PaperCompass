@@ -1,0 +1,36 @@
+{
+    "track": [
+        "AI and Arts",
+        "AI for Good",
+        "AI for Good - Projects",
+        "Demo Track",
+        "Doctoral Consortium",
+        "Early Career",
+        "Journal Track",
+        "Late Papers",
+        "Sister Conferences Best Papers",
+        "Survey Track",
+        "main"
+    ],
+    "status": [
+        "Poster"
+    ],
+    "primary_area": [
+        "",
+        "AI Ethics, Trust, Fairness",
+        "Agent-based and Multi-agent Systems",
+        "Computer Vision",
+        "Constraint Satisfaction and Optimization",
+        "Data Mining",
+        "Game Theory and Economic Paradigms",
+        "Humans and AI",
+        "Knowledge Representation and Reasoning",
+        "Machine Learning",
+        "Multidisciplinary Topics and Applications",
+        "Natural Language Processing",
+        "Planning and Scheduling",
+        "Robotics",
+        "Search",
+        "Uncertainty in AI"
+    ]
+}

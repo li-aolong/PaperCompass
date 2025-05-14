@@ -1,0 +1,51 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "TOG Paper",
+        "Technical Paper"
+    ],
+    "sess": [
+        "A Material World",
+        "All About Meshes",
+        "Beyond The Headset",
+        "Character Animation",
+        "Colorful Topics In Imaging",
+        "Contours, Conformality, Coarsening, and Coordinates",
+        "Deep Geometric Learning",
+        "Diffusion for Geometry",
+        "Does Anybody Know How I Got Here?",
+        "Fabricating Appearance",
+        "Fabrication-Oriented Design",
+        "Fast, Large and Learned Deformables",
+        "From Knitting to Circuits",
+        "Geometric Optimization",
+        "Going With the Flow",
+        "Gotta Go Fast!",
+        "Image and Video Editing",
+        "Interaction",
+        "Knowing What To Do With Your Hands",
+        "Magical Sketching",
+        "Making Faces With Neural Avatars",
+        "Marvelous Mappings",
+        "Material Acquisition",
+        "Material Rendering",
+        "Modeling Shells and Hair",
+        "Motion Recipes and Simulation",
+        "NeRFs for Avatars",
+        "NeRFs on Earth",
+        "Neural Capturing",
+        "Neural Image Generation and Editing",
+        "Neural Light Transport",
+        "Not Just for Cubists",
+        "Procedural Modeling",
+        "Pushing the Boundaries",
+        "Seeing What's in Front of Your Eyes",
+        "Simulating and Detecting Collisions",
+        "Surface Reconstruction",
+        "Surfaces, Strips, Lights",
+        "Text-Guided Generation",
+        "Your GPU Is Somewhere Else"
+    ]
+}

@@ -1,0 +1,46 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "Appearance Capture",
+        "Character Fashion & Style",
+        "Computational Illumination",
+        "Computational Printing",
+        "Constraints, Collisions, and Clarinets",
+        "Deform Me a Solid",
+        "Fabricating Fabulous Forms",
+        "Fabrication & Function",
+        "Face Reality",
+        "Fluids, From Air to Goo",
+        "Geometry Field Trip",
+        "Geometry Zoo",
+        "Image Processing",
+        "Image Similarity & Search",
+        "Let’s Do the Time Warp",
+        "Light Fields",
+        "Meshful Thinking",
+        "Meshing Around",
+        "Modeling, Controlling, and Suturing Humans",
+        "Parameterization & Mapping",
+        "Perception & Color",
+        "Printing Elastics",
+        "Procedural Modeling",
+        "Reconstruction & Analysis",
+        "Rendering Complex Appearance",
+        "Sampling & Filtering",
+        "Scalable Graphics",
+        "Shape Analysis",
+        "Simsquishal Geometry",
+        "Simulating With Surfaces",
+        "Sketching & Surfacing",
+        "Taking Control",
+        "Transfer & Capture",
+        "VR, Display, and Interaction",
+        "Video Processing",
+        "Wave-Particle Fluidity "
+    ]
+}

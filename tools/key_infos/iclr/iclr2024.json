@@ -1,0 +1,35 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Desk Reject",
+        "Oral",
+        "Poster",
+        "Reject",
+        "Spotlight",
+        "Withdraw"
+    ],
+    "primary_area": [
+        "applications to neuroscience & cognitive science",
+        "applications to physical sciences (physics, chemistry, biology, etc.)",
+        "applications to robotics, autonomy, planning",
+        "causal reasoning",
+        "datasets and benchmarks",
+        "general machine learning (i.e., none of the above)",
+        "generative models",
+        "infrastructure, software libraries, hardware, etc.",
+        "learning on graphs and other geometries & topologies",
+        "learning theory",
+        "metric learning, kernel learning, and sparse coding",
+        "neurosymbolic & hybrid AI systems (physics-informed, logic & formal reasoning, etc.)",
+        "optimization",
+        "probabilistic methods (Bayesian methods, variational inference, sampling, UQ, etc.)",
+        "reinforcement learning",
+        "representation learning for computer vision, audio, language, and other modalities",
+        "societal considerations including fairness, safety, privacy",
+        "transfer learning, meta learning, and lifelong learning",
+        "unsupervised, self-supervised, semi-supervised, and supervised representation learning",
+        "visualization or interpretation of learned representations"
+    ]
+}

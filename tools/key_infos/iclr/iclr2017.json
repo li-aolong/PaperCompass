@@ -1,0 +1,14 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Oral",
+        "Poster",
+        "Reject",
+        "Workshop"
+    ],
+    "primary_area": [
+        ""
+    ]
+}

@@ -1,0 +1,48 @@
+{
+    "track": [
+        "Datasets & Benchmarks",
+        "Journal",
+        "main"
+    ],
+    "status": [
+        "Journal",
+        "Oral",
+        "Poster",
+        "Reject",
+        "Spotlight"
+    ],
+    "primary_area": [
+        "",
+        "active_learning",
+        "algorithmic_game_theory",
+        "bandits",
+        "causal_inference",
+        "deep_learning_architectures",
+        "diffusion_based_models",
+        "evaluation",
+        "fairness",
+        "generative_models",
+        "graph_neural_networks",
+        "human-AI_interaction",
+        "infrastructure",
+        "interpretability_and_explainability",
+        "learning_theory",
+        "machine_learning_for_healthcare",
+        "machine_learning_for_other_sciences_and_fields",
+        "machine_learning_for_physical_sciences",
+        "machine_learning_for_social_sciences",
+        "machine_vision",
+        "natural_language_processing",
+        "neuroscience_and_cognitive_science",
+        "online_learning",
+        "optimization",
+        "optimization_for_deep_networks",
+        "other",
+        "privacy",
+        "probabilistic_methods",
+        "reinforcement_learning",
+        "robotics",
+        "safety_in_machine_learning",
+        "speech_and_audio"
+    ]
+}

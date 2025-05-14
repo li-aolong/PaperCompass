@@ -1,0 +1,50 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Poster",
+        "TOG Paper",
+        "Technical Paper"
+    ],
+    "sess": [
+        "Adaptive/Assistive Technology",
+        "An Ode to Solvers",
+        "Animation",
+        "Art & Design",
+        "Augmented & Virtual Realities",
+        "Benchmarks, Datasets and Learning",
+        "Character Animation",
+        "Cloth & Patterns",
+        "Computational Design and Fabrication",
+        "Computational Photography",
+        "Contact and Fracture",
+        "Convolutions and Neural Fields",
+        "Design,  Direct, Plan & Program",
+        "Differentiable Rendering and Neural Fields",
+        "Display & Rendering",
+        "Display, Write, and Unwrap",
+        "Faces and Facial Animation",
+        "Fluid Simulation",
+        "Image Processing & Computer Vision",
+        "Image/Video Editing and Generation",
+        "Large Scenes and Fast Neural Rendering",
+        "Learning \"In Style\"",
+        "Meshing & Mapping",
+        "Modeling & Geometry",
+        "Neural Geometry Processing",
+        "Neural Objects, Materials and Illumination",
+        "Neural Pets, People and Avatars",
+        "New Wrinkles in Cloth and Shells",
+        "Perception",
+        "Phenomenological Animation",
+        "Physics-Based Character Control",
+        "Ray Tracing  & Monte Carlo  Methods",
+        "Reconstruction",
+        "Reflectance, Shading Models and Shaders",
+        "Sampling, Reconstruction & Appearance",
+        "Shape Analysis & Approximation",
+        "Sketches, Strokes, and Ropes",
+        "Volumes and Materials"
+    ]
+}

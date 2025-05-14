@@ -1,0 +1,45 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "Animating Characters",
+        "Changing Your Perception",
+        "Computational Sensing & Display",
+        "Controlling Character",
+        "Depth for All Occasions",
+        "Displays",
+        "Fabrication",
+        "Fabrication-Oriented Design",
+        "Faces",
+        "Fast Rendering",
+        "Fields on Surfaces",
+        "Fluids",
+        "Games & Design",
+        "Geometry Processing",
+        "Hair & Collisions",
+        "Hardware Systems",
+        "Image Tricks",
+        "Interactive Modeling",
+        "Layout Building & Scenes",
+        "Light Transport",
+        "Mesh-Based Simulation",
+        "Non-Photorealistic Rendering",
+        "Points & Reconstruction",
+        "Reflectance: Modeling, Capturing, Renderings",
+        "Sampling & Spectra",
+        "Shady Images",
+        "Shape Analysis",
+        "Shape Collection",
+        "Sound & Light",
+        "Stretching & Flowing",
+        "Subspace & Spacetime",
+        "Surfaces, Deformation, and Correspondence",
+        "Surfaces, Shapes, and Maps",
+        "Typography & Illustration",
+        "Video Applications"
+    ]
+}

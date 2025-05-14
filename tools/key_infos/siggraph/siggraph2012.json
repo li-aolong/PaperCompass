@@ -1,0 +1,41 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "All About Images",
+        "Appearance",
+        "Character Locomotion",
+        "Cloth",
+        "Collisions",
+        "Control Deformables",
+        "Displays",
+        "Fabrication",
+        "Faces and Hair",
+        "Fun With Video",
+        "Geometry Reconstruction & Tracking",
+        "Geometry and Viewing",
+        "Hand, Eye, and Face",
+        "Image Processing",
+        "Interactive Systems & Hardware",
+        "Layout and Parameterization",
+        "Light Rays",
+        "Maps, Surfaces, and Shapes",
+        "Mesh Based Fluids",
+        "Noise and Texture",
+        "Particle Fluids",
+        "Perception and Stereo",
+        "Physics and Mathematics for Light",
+        "Rigid Bodies and Penalty Forces",
+        "Sampling, Reconstructing, and Filtering Light",
+        "Sets of Shapes",
+        "Shape Analysis",
+        "Shape Transformation",
+        "Sketching",
+        "Sound and Elements",
+        "Stitching"
+    ]
+}

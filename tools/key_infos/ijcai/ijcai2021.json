@@ -1,0 +1,31 @@
+{
+    "track": [
+        "Demo Track",
+        "Doctoral Consortium",
+        "Early Career",
+        "Sister Conferences Best Papers",
+        "Survey Track",
+        "main"
+    ],
+    "status": [
+        "Poster"
+    ],
+    "primary_area": [
+        "",
+        "AI Ethics, Trust, Fairness",
+        "Agent-based and Multi-agent Systems",
+        "Computer Vision I",
+        "Computer Vision II",
+        "Constraints and SAT",
+        "Data Mining",
+        "Heuristic Search and Game Playing",
+        "Humans and AI",
+        "Knowledge Representation and Reasoning",
+        "Machine Learning",
+        "Machine Learning Applications",
+        "Multidisciplinary Topics and Applications",
+        "Natural Language Processing",
+        "Planning and Scheduling",
+        "Uncertainty in AI"
+    ]
+}

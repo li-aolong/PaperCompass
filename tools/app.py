@@ -10,17 +10,15 @@ import glob
 from typing import List, Dict, Any, Optional
 import logging
 from extract import load_data, filter_data, count_results, SEARCH_MODE_AND, SEARCH_MODE_OR, DEFAULT_FIELDS
+from key_fields_loader import load_conference_key_fields, get_available_conferences, get_conference_years, load_conference_categories
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Constants
-CONFERENCES = [
-    "iclr", "nips", "icml", "cvpr", "iccv", "eccv", "emnlp", "corl", 
-    "siggraph", "siggraphasia", "www", "wacv", "aistats", "colm"
-]
-DATA_SEARCH_MODES = ["Single File", "Conference Directory", "Multiple Conferences"]
+CONFERENCES = [name for name in os.listdir('../') if os.path.isdir(os.path.join('../', name)) and name != 'tools' and not name.startswith('.')]
+
+DATA_SEARCH_MODES = ["All Papers", "Conference(s)"]
 
 # Use Streamlit cache for expensive operations
 @st.cache_data
@@ -35,20 +33,13 @@ def load_conference_data(conference_name: str) -> Optional[List[Dict[str, Any]]]
         Optional[List[Dict[str, Any]]]: Conference data if successful, None otherwise
     """
     # Base directories to search
-    base_dirs = [
-        "",  # Current directory
-        "../",  # Parent directory
-        "paperlists/",  # paperlists subdirectory
-        "../paperlists/"  # paperlists in parent directory
-    ]
+    base_dir = "../"
     
     # Find directory containing conference data
     conf_dir = None
-    for base in base_dirs:
-        possible_dir = os.path.join(base, conference_name)
-        if os.path.isdir(possible_dir):
-            conf_dir = possible_dir
-            break
+    possible_dir = os.path.join(base_dir, conference_name)
+    if os.path.isdir(possible_dir):
+        conf_dir = possible_dir
     
     if not conf_dir:
         st.error(f"Could not find directory for {conference_name}")
@@ -68,7 +59,7 @@ def load_conference_data(conference_name: str) -> Optional[List[Dict[str, Any]]]
     try:
         with open(latest_file, encoding='utf-8') as f:
             data = json.load(f)
-            st.info(f"Loaded data from {os.path.basename(latest_file)}")
+            # st.info(f"Loaded data from {os.path.basename(latest_file)}")
             return data
     except (FileNotFoundError, json.JSONDecodeError) as e:
         st.error(f"Error loading {os.path.basename(latest_file)}: {str(e)}")
@@ -83,47 +74,57 @@ def create_search_sidebar() -> Dict[str, Any]:
         Dict[str, Any]: Dictionary containing search parameters
     """
     with st.sidebar:
-        st.header("Search Configuration")
+        st.subheader("选择论文来源")
+        data_search_mode = st.radio(
+            "数据源:",
+            DATA_SEARCH_MODES,
+            help="选择您希望如何搜索论文",
+            horizontal=False,
+            index=None,
+            label_visibility="collapsed"
+        )
+        
+        st.header("搜索配置")
         keyword = st.text_input(
-            "Enter keyword(s):", 
-            value="retrieval",
-            help="Multiple keywords can be separated by commas or spaces (e.g., 'retrieval agent' or 'retrieval,agent')"
+            "输入关键词:", 
+            value="",
+            help="多个关键词可以用逗号或空格分隔（例如：'retrieval agent' 或 'retrieval,agent'）。留空将显示所有结果。"
         )
         
         search_mode = st.radio(
-            "Keywords Search Mode:",
+            "关键词搜索模式:",
             [SEARCH_MODE_OR, SEARCH_MODE_AND],
-            help=f"{SEARCH_MODE_OR}: Find papers with ANY of these keywords. {SEARCH_MODE_AND}: Find papers with ALL of these keywords."
+            help=f"{SEARCH_MODE_OR}: 查找包含任一关键词的论文。{SEARCH_MODE_AND}: 查找包含所有关键词的论文。",
+            horizontal=True
         )
         
         fields_to_search = st.multiselect(
-            "Select fields to search:",
+            "选择要搜索的字段（多选）:",
             options=DEFAULT_FIELDS,
-            default=DEFAULT_FIELDS
+            default=None
         )
         
-        # Add advanced filtering options
-        st.subheader("Advanced Filters")
-        include_rejected = st.checkbox(
-            "Include rejected/withdrawn papers", 
+        st.subheader("其它选项")
+        show_all_fields = st.checkbox(
+            "显示全部字段", 
             value=False,
-            help="By default, only accepted papers are shown. Check this to include rejected or withdrawn papers."
-        )
-
-        # Add conference selection
-        st.subheader("Conference Selection")
-        data_search_mode = st.radio(
-            "Data Source:",
-            DATA_SEARCH_MODES,
-            help="Choose how you want to search for papers"
+            help="勾选此项将显示论文的所有字段。"
         )
         
+        include_rejected = st.checkbox(
+            "包含被拒绝/撤回的论文", 
+            value=False,
+            help="勾选此项可包含被拒绝或撤回的论文。"
+        )
+        
+    
     return {
         "keyword": keyword,
         "search_mode": search_mode,
         "fields_to_search": fields_to_search,
-        "include_rejected": include_rejected,  # Add new parameter
-        "data_search_mode": data_search_mode
+        "data_search_mode": data_search_mode,
+        "show_all_fields": show_all_fields,
+        "include_rejected": include_rejected,
     }
 
 
@@ -135,41 +136,118 @@ def load_data_source(data_search_mode: str) -> tuple:
         data_search_mode (str): Type of data source to load
         
     Returns:
-        tuple: (data, source) where data is the loaded data and source is its description
+        tuple: (data, source, key_fields_filters) where data is the loaded data, 
+               source is its description, and key_fields_filters contains any key field filters
     """
     data = None
     source = ""
+    key_fields_filters = {}
+    conference_categories = {}  # 存储每个会议的研究方向分类
     
-    if data_search_mode == DATA_SEARCH_MODES[0]:  # Single File
-        uploaded_file = st.file_uploader("Upload JSON file:", type=["json"])
-        if uploaded_file is not None:
-            try:
-                data = json.load(uploaded_file)
-                source = uploaded_file.name
-            except json.JSONDecodeError:
-                st.error("Invalid JSON file format. Please check the file.")
+    if data_search_mode == DATA_SEARCH_MODES[0]:  # All Papers
+        # 加载所有会议的论文数据
+        data = []
+        loaded_conferences = []
+        
+        for conf in CONFERENCES:
+            conf_data = load_conference_data(conf)
+            if conf_data:
+                for paper_item in conf_data: # Ensure each paper has its source conference
+                    paper_item['source'] = conf
+                data.extend(conf_data)
+                loaded_conferences.append(conf)
+        
+        if data:
+            st.session_state['data'] = data
+            source = "All Papers (" + ", ".join(loaded_conferences) + ")"
+            st.info(f"已加载 {len(loaded_conferences)} 个会议的 {len(data)} 篇论文")
+            # Clear conference-specific filters when switching to All Papers
+            if 'conference_categories' in st.session_state:
+                del st.session_state['conference_categories']
+            # key_fields_filters is returned by this function, so it will be an empty dict
+            # for 'All Papers' mode, which is correct. We ensure no old values are passed
+            # by re-initializing it at the start of the function.
         else:
-            data = load_data("iclr2025.json")
-            source = "iclr2025.json"
+            st.error("未能加载任何会议数据")
+            source = "No Data"
     
-    elif data_search_mode == DATA_SEARCH_MODES[1]:  # Conference Directory
-        conference = st.selectbox("Select Conference:", CONFERENCES)
-        data = load_conference_data(conference)
-        source = conference
-    
-    else:  # Multiple Conferences
-        conferences = st.multiselect("Select Conferences:", CONFERENCES)
+    elif data_search_mode == DATA_SEARCH_MODES[1]: # Conference(s)
+        conferences = st.multiselect("选择会议:", CONFERENCES)
+        st.session_state['selected_conferences'] = conferences
+        
         if conferences:
+            # 加载所有选中会议的数据
             data = []
             for conf in conferences:
                 conf_data = load_conference_data(conf)
                 if conf_data:
+                    for paper_item in conf_data: # Ensure each paper has its source conference
+                        paper_item['source'] = conf
                     data.extend(conf_data)
-            source = "+".join(conferences)
+                    # 加载会议的研究方向分类
+                    categories_loaded = load_conference_categories(conf)
+                    if categories_loaded:
+                        conference_categories[conf] = categories_loaded
+            
+            st.session_state['data'] = data
+            
+            # 设置数据源描述
+            if len(conferences) == 1:
+                source = conferences[0]
+            else:
+                source = "+".join(conferences)
+            
+            # 在侧边栏添加筛选选项
+            with st.sidebar:
+                # 为每个会议添加研究方向筛选和关键字段筛选
+                for conf in conferences:
+                    st.subheader(conf.upper())
+                    
+                    # 添加研究方向筛选
+                    categories_for_conf = conference_categories.get(conf, {})
+                    if categories_for_conf:
+                        category_options = list(categories_for_conf.keys())
+                        if category_options:
+                            selected_categories = st.multiselect(
+                                f"研究方向:",
+                                options=category_options,
+                                default=[],
+                                help="选择特定的研究方向进行筛选，可多选"
+                            )
+                            # 无论是否选择研究方向，都更新会话状态
+                            if 'conference_categories' not in st.session_state:
+                                st.session_state['conference_categories'] = {}
+                            
+                            # 如果用户取消了所有选择，则从会话状态中移除该会议的研究方向筛选
+                            if not selected_categories and conf in st.session_state['conference_categories']:
+                                del st.session_state['conference_categories'][conf]
+                            # 如果有选择，则更新会话状态
+                            elif selected_categories:
+                                st.session_state['conference_categories'][conf] = selected_categories
+                    
+                    # 添加关键字段筛选
+                    key_fields = load_conference_key_fields(conf)
+                    
+                    for field, values in key_fields.items():
+                        if values:
+                            field_key = f"{conf}_{field}"
+                            selected = st.multiselect(
+                                f"{field.capitalize()}:",
+                                options=values,
+                                default=[],
+                                help=f"选择要筛选的 {field} 值。不选择则显示所有值。",
+                                key=field_key
+                            )
+                            if selected:
+                                if field not in key_fields_filters:
+                                    key_fields_filters[field] = {}
+                                key_fields_filters[field][conf] = selected
         else:
-            st.warning("Please select at least one conference.")
+            data = None
+            st.session_state['data'] = None
+            source = ""
     
-    return data, source
+    return data, source, key_fields_filters
 
 
 def display_search_results(data, source, search_params):
@@ -184,97 +262,205 @@ def display_search_results(data, source, search_params):
     keyword = search_params["keyword"]
     search_mode = search_params["search_mode"]
     fields_to_search = search_params["fields_to_search"]
-    include_rejected = search_params["include_rejected"]  # Get new parameter
+    include_rejected = search_params["include_rejected"]
+    key_fields_filters = search_params.get("key_fields_filters", {})
+    show_all_fields = search_params.get("show_all_fields", False)
     
+    conference_categories_selection = st.session_state.get('conference_categories', {})
+    
+    data = st.session_state.get('data')
+    if source == '':
+        st.warning("请选择会议")
+        return
     if not data:
-        st.error("Unable to load data. Please check the input file or directory.")
+        st.error("无法加载数据，请检查。")
         return
         
-    if not keyword:
-        st.warning("Please enter at least one keyword.")
-        return
-        
-    # Show what keywords are being searched
     keywords_list = [k.strip() for k in keyword.replace(',', ' ').split() if k.strip()]
-    if len(keywords_list) > 1:
-        if search_mode == SEARCH_MODE_OR:
-            st.write(f"Searching for papers containing ANY of these keywords: {', '.join(keywords_list)}")
-        else:
-            st.write(f"Searching for papers containing ALL of these keywords: {', '.join(keywords_list)}")
-    
-    # Add filtering condition description
-    if not include_rejected:
-        st.info("Showing only accepted papers. To include rejected/withdrawn papers, check the advanced filter option.")
-    
-    with st.spinner('Processing data...'):
-        # Filter data
-        status_filtered, filtered = filter_data(data, keyword, fields_to_search, search_mode, include_rejected)
 
-        # Calculate statistics
+    if fields_to_search == [] and keywords_list != []:
+        st.warning("请选择要搜索的字段")
+        return
+    if fields_to_search != [] and keywords_list == []:
+        st.warning("请输入关键词")
+        return
+
+    if keywords_list:
+        if len(keywords_list) > 1:
+            if search_mode == SEARCH_MODE_OR:
+                st.info(f"搜索包含任一关键词的论文: {', '.join(keywords_list)}")
+            else:
+                st.info(f"搜索包含所有关键词的论文: {', '.join(keywords_list)}")
+        else:
+            st.info(f"搜索包含关键词的论文: {keywords_list[0]}")
+    else:
+        st.info("未输入关键词，将显示所有符合筛选条件的论文。")
+    
+    if key_fields_filters:
+        filter_descriptions = []
+        for field, conf_values_dict in key_fields_filters.items():
+            field_specific_descriptions = []
+            for conf_name, values in conf_values_dict.items():
+                if values:
+                    str_values = [str(val) for val in values]
+                    field_specific_descriptions.append(f"{conf_name} {field.capitalize()}: {', '.join(str_values)}")
+            if field_specific_descriptions:
+                 filter_descriptions.append(" | ".join(field_specific_descriptions))
+
+        if filter_descriptions:
+            st.info(f"应用的关键字段筛选: {'; '.join(filter_descriptions)}")
+            
+    if conference_categories_selection:
+        display_messages = []
+        for conf_name, selected_cats in conference_categories_selection.items():
+            if selected_cats:
+                display_messages.append(f"{conf_name} 研究方向: {', '.join(selected_cats)}")
+        if display_messages:
+            st.info(f"研究方向分类筛选: {' | '.join(display_messages)}")
+
+    with st.spinner('正在处理数据...'):
+        if keywords_list:
+            status_filtered, filtered = filter_data(data, keyword, fields_to_search, search_mode, include_rejected)
+        else:
+            if include_rejected:
+                status_filtered = data
+                filtered = data
+            else:
+                status_filtered = [item for item in data if item.get('status') not in ['Withdraw', 'Reject', 'Desk Reject']]
+                filtered = status_filtered
+        
+        if key_fields_filters and filtered:
+            data_search_mode = search_params.get("data_search_mode", "")
+            
+            if data_search_mode == DATA_SEARCH_MODES[1]: # Conference(s)
+                filtered_papers_after_key_fields = []
+                for paper in filtered:
+                    paper_conf = paper.get('source')
+                    include_paper = True
+                    
+                    for field, conf_values_map in key_fields_filters.items():
+                        if paper_conf in conf_values_map and conf_values_map[paper_conf]:
+                            field_value_in_paper = paper.get(field)
+                            selected_values_for_conf_field = conf_values_map[paper_conf]
+                            
+                            if field == 'award' and isinstance(field_value_in_paper, bool):
+                                str_selected_values = [str(val).lower() for val in selected_values_for_conf_field]
+                                if str(field_value_in_paper).lower() not in str_selected_values:
+                                    include_paper = False
+                                    break
+                            elif field_value_in_paper not in selected_values_for_conf_field:
+                                include_paper = False
+                                break
+                    
+                    if include_paper:
+                        filtered_papers_after_key_fields.append(paper)
+                filtered = filtered_papers_after_key_fields
+        
+        data_search_mode = search_params.get("data_search_mode", "")
+        if data_search_mode == DATA_SEARCH_MODES[1]: # Conference(s)
+            if conference_categories_selection and filtered:
+                filtered_papers_after_category = []
+                for paper in filtered:
+                    paper_conf = paper.get('source')
+                    
+                    if paper_conf not in conference_categories_selection or not conference_categories_selection[paper_conf]:
+                        filtered_papers_after_category.append(paper)
+                        continue
+                    
+                    selected_categories_for_conf = conference_categories_selection[paper_conf]
+                    
+                    actual_conf_categories_data = load_conference_categories(paper_conf)
+
+                    if not actual_conf_categories_data:
+                        filtered_papers_after_category.append(paper)
+                        continue
+                    
+                    paper_ids_in_selected_cats = set()
+                    for cat_name in selected_categories_for_conf:
+                        if cat_name in actual_conf_categories_data:
+                            paper_ids_in_selected_cats.update(actual_conf_categories_data[cat_name])
+                    
+                    if paper.get('id') in paper_ids_in_selected_cats:
+                        filtered_papers_after_category.append(paper)
+                
+                filtered = filtered_papers_after_category
+
         counts = count_results(data, status_filtered, filtered, keyword, fields_to_search, search_mode)
 
-        # Display results with more intuitive metric names
-        st.subheader("Search Statistics")
+        st.subheader("搜索统计")
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.metric(
-                "Total Papers",
-                len(data)
-            )
+            st.metric("总论文数", len(data))
         with col2:
-            st.metric(
-                "Papers After Status Filter" if include_rejected else "Accepted Papers",
-                counts['status_filtered_count']
-            )
+            st.metric("状态筛选后的论文" if include_rejected else "已接收的论文", counts['status_filtered_count'])
         with col3:
-            st.metric(
-                "Matching Results",
-                counts['retrieval_filtered_count']
-            )
+            st.metric("匹配结果", len(filtered))
 
-        # Display filtered papers
         if filtered:
-            st.subheader(f"Found {len(filtered)} Matching Papers")
+            st.subheader(f"找到 {len(filtered)} 篇匹配的论文")
             
-            # Add source information if not present
             for paper in filtered:
                 if 'source' not in paper:
                     paper['source'] = source
+            
+            if not show_all_fields:
+                display_fields = ['title', 'status', 'track', 'abstract', 'site', 'keywords', 'primary_area', 'award', 'source', 'id']
+                filtered_display = []
+                for paper in filtered:
+                    paper_display = {}
+                    for field in display_fields:
+                        if field in paper:
+                            paper_display[field] = paper[field]
+                    if 'id' not in paper_display and 'id' in paper :
+                         paper_display['id'] = paper['id']
+                    filtered_display.append(paper_display)
+                
+                st.info("当前只显示部分重要字段。如需查看全部字段，请在侧边栏勾选\"显示全部字段\"选项。")
+                st.dataframe(filtered_display)
+            else:
+                st.dataframe(filtered)
 
-            # Convert to DataFrame for better display
-            st.dataframe(filtered)
-
-            # Download button
             output_data = {
                 "total_papers": len(data),
                 "papers_after_status_filter": counts['status_filtered_count'],
-                "matching_results": counts['retrieval_filtered_count'],
+                "matching_results": len(filtered),
                 "filtered_papers": filtered
             }
             
+            filename = f"filtered_results-{source.replace('+', '_')}"
+            if keyword:
+                filename += f"-{keyword.replace(' ', '_').replace(',', '_')}"
+            
             st.download_button(
-                label="Download Results (JSON)",
+                label="下载结果 (JSON)",
                 data=json.dumps(output_data, ensure_ascii=False, indent=2),
-                file_name=f"filtered_results-{keyword}-{source}.json",
+                file_name=f"{filename}.json",
                 mime="application/json"
             )
         else:
-            st.info(f"No papers found containing the keyword '{keyword}'.")
+            st.info("没有找到符合条件的论文。")
 
 
 def main():
-    """Main function that sets up the Streamlit interface and handles user interactions."""
-    st.title("Paper Search Tool")
+    """设置 Streamlit 界面并处理用户交互的主函数。"""
+    st.set_page_config(page_title="论文搜索工具", layout="wide")
 
-    # Get search parameters from sidebar
+
+    # 从侧边栏获取搜索参数
     search_params = create_search_sidebar()
 
-    # Load data from selected source
-    data, source = load_data_source(search_params["data_search_mode"])
+    if search_params['data_search_mode'] is None:
+        st.warning("请选择论文来源")
+        return
 
-    # Search button and results
-    if st.button("Search Papers"):
+    data, source, key_fields_filters = load_data_source(search_params["data_search_mode"])
+    
+    # 将关键字段筛选添加到搜索参数中
+    search_params["key_fields_filters"] = key_fields_filters
+
+    # 搜索按钮和结果
+    if st.button("搜索论文"):
         display_search_results(data, source, search_params)
 
 

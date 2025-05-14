@@ -1,0 +1,47 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Poster",
+        "Technical Paper"
+    ],
+    "sess": [
+        "Acquisition",
+        "Animating Human Characters",
+        "Appearance Modeling and Capture",
+        "Character Animation",
+        "Cloth and Hair Simulation",
+        "Computer Vision and Image Understanding",
+        "Computer-Aided Design",
+        "Differentiable Rendering",
+        "Display and Print Technologies",
+        "Distances and Matching",
+        "Everything Interactive and Dynamic",
+        "Face, Speech, and Gesture",
+        "Faces and Avatars",
+        "Fluid Simulation",
+        "Geometric Operations",
+        "Geometry and Modeling",
+        "Human-Computer Interaction",
+        "Image Editing and Manipulation",
+        "Image Generation",
+        "Image and Video Processing Applications",
+        "Machine Learning for Computer Graphics",
+        "Maps and Fields",
+        "Material Simulation",
+        "Material and Rendering",
+        "Perception in VR and AR",
+        "Radiance Fields, Bases, and Probes",
+        "Reconstruction and Repair",
+        "Rendering Systems",
+        "Rendering Techniques",
+        "Sampling and Reconstruction",
+        "Shape Generation",
+        "Simulation of Everything",
+        "Solids and Fluids",
+        "Stylization and Colorization",
+        "VR and Interaction",
+        "Virtual Reality, Augmented Reality, and Mixed Reality"
+    ]
+}

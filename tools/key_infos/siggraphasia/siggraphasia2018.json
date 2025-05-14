@@ -1,0 +1,36 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "Acquiring and Editing Geometry via RGB (D) Images",
+        "Acquisition, Rendering and Display for Virtual Reality",
+        "Advanced SVBRDF",
+        "Aerial Propagation",
+        "Beyond Light Transport",
+        "Capturing 4D Performances",
+        "Character Animation",
+        "Fabulously Computed Fashion",
+        "Faces, Faces, Faces",
+        "Fun in Geometry and Fabrication",
+        "Geometry Generation",
+        "Get Wired [Last Session, Town-Hall Meeting After]",
+        "How People Look and Move",
+        "IM–Material",
+        "Image Processing",
+        "Learning Geometry",
+        "Learning to Compose and Decompose",
+        "Low–Level Imaging",
+        "Mapping + Transport",
+        "Meshing",
+        "Mixed Reality",
+        "Modeling Things on (and in) Your Head",
+        "Nets, Cages and Meshes",
+        "Optimizing Structures and Materials",
+        "Rendering and Reflectance",
+        "Structured Simulation"
+    ]
+}

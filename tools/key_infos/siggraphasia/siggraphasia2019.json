@@ -1,0 +1,31 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Technical Paper"
+    ],
+    "sess": [
+        "Accelerated Physics",
+        "Building Knowledge",
+        "Composing & Decomposing Geometry",
+        "Data - Driven Dynamics",
+        "Differentiable Rendering",
+        "Fluids Aflow",
+        "Geometry Brekkie",
+        "Geometry Off the Deep End",
+        "Geometry with Style",
+        "Hairy & Sketchy Geometry",
+        "Learning from Video",
+        "Learning to Move",
+        "Light Hardware",
+        "Light Transport",
+        "Looking & Sounding Great",
+        "Network",
+        "Photography in the Field",
+        "Samples & Speckles",
+        "Synthesis in the Arvo",
+        "Thoughts on Display",
+        "Watch Your Language"
+    ]
+}

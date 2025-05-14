@@ -1,0 +1,51 @@
+{
+    "track": [
+        "main"
+    ],
+    "status": [
+        "Poster",
+        "TOG Paper",
+        "Technical Paper"
+    ],
+    "sess": [
+        "Acquiring, Perceiving and Rendering Material Appearance",
+        "Adaptive/Assistive Technology",
+        "Advanced Volume Rendering",
+        "Animation and Skinning",
+        "Art & Design",
+        "Augmented & Virtual Realities",
+        "Capture Control",
+        "Computational Imaging",
+        "Deformation and FEM",
+        "Design and Layout",
+        "Display & Rendering",
+        "Fabricated Results",
+        "Fabrication",
+        "Fluids I",
+        "Fluids II",
+        "Hardware Interfaces",
+        "High Performance Rendering",
+        "Human Capture and Modeling",
+        "Image Science",
+        "Learning to Move",
+        "Light Science",
+        "MPM and Collision",
+        "Machine Learning for Rendering",
+        "Maps and Operators",
+        "Meshing",
+        "Motion is in Control",
+        "Neural Rendering",
+        "Off the Deep End",
+        "Parallel and Optimal",
+        "Photo Science",
+        "Production",
+        "Relighting and View Synthesis",
+        "Research",
+        "Scene and Object Reconstruction",
+        "Shape Science",
+        "Sound Graphics",
+        "Textiles and Fabrication",
+        "VR and AR",
+        "Video"
+    ]
+}

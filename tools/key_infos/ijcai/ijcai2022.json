@@ -1,0 +1,37 @@
+{
+    "track": [
+        "Demo Track",
+        "Doctoral Consortium",
+        "Early Career",
+        "Journal Track",
+        "Sister Conferences Best Papers",
+        "Special Track on AI for Good",
+        "Special Track on AI, the Arts and Creativity",
+        "Survey Track",
+        "main"
+    ],
+    "status": [
+        "Poster"
+    ],
+    "primary_area": [
+        "",
+        "AI Ethics, Trust, Fairness",
+        "Agent-based and Multi-agent Systems",
+        "Computer Vision",
+        "Constraint Satisfaction and Optimization",
+        "Data Mining",
+        "Demos",
+        "Exhibits",
+        "Humans and AI",
+        "Knowledge Representation and Reasoning",
+        "Machine Learning",
+        "Multidisciplinary Topics and Applications",
+        "Natural Language Processing",
+        "Planning and Scheduling",
+        "Projects",
+        "Research Papers",
+        "Robotics",
+        "Search",
+        "Uncertainty in AI"
+    ]
+}
