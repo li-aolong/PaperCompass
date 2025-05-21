@@ -1,30 +1,48 @@
 {
-    "track": [
-        "main"
+  "track": [
+    "main"
+  ],
+  "status": [
+    "Technical Paper"
+  ],
+  "sess": [
+    "05: Synthesizing Human Images",
+    "06: Facial Animation and Rendering",
+    "07: Scene Synthesis and Navigation",
+    "08: Natural Phenomena",
+    "10: Audio and Visual Displays",
+    "12: Geometry Processing and Simulation",
+    "Character Simulation",
+    "Computational Photography",
+    "Curves and Surfaces",
+    "Fabrication",
+    "Light Interactions and Differentiable Rendering",
+    "Meshing",
+    "NPR and Digital Art",
+    "Neural Rendering",
+    "Physically-based Simulation and Motion Control",
+    "Real-time Rendering",
+    "Reconstruction",
+    "Sampling and Denoising",
+    "Surface Parameterization and Texturing",
+    "Turbulence and Fluids"
+  ],
+  "categories": {
+    "NLP": [],
+    "CV": [
+      "Modeling Clothing as a Separate Layer for an Animatable Human Avatar",
+      "SuperTrack: Motion Tracking for Physically Simulated Characters using Supervised Learning",
+      "PBNS: Physically Based Neural Simulation for Unsupervised Garment Pose Space Deformation"
     ],
-    "status": [
-        "Technical Paper"
+    "Video": [
+      "Motion Recommendation for Online Character Control"
     ],
-    "sess": [
-        "05: Synthesizing Human Images",
-        "06: Facial Animation and Rendering",
-        "07: Scene Synthesis and Navigation",
-        "08: Natural Phenomena",
-        "10: Audio and Visual Displays",
-        "12: Geometry Processing and Simulation",
-        "Character Simulation",
-        "Computational Photography",
-        "Curves and Surfaces",
-        "Fabrication",
-        "Light Interactions and Differentiable Rendering",
-        "Meshing",
-        "NPR and Digital Art",
-        "Neural Rendering",
-        "Physically-based Simulation and Motion Control",
-        "Real-time Rendering",
-        "Reconstruction",
-        "Sampling and Denoising",
-        "Surface Parameterization and Texturing",
-        "Turbulence and Fluids"
+    "Audio": [],
+    "Multimodal": [
+      "Transflower: probabilistic autoregressive dance generation with multimodal attention"
+    ],
+    "Other": [
+      ""
     ]
+  }
 }

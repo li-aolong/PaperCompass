@@ -1,15 +1,83 @@
 {
-    "track": [
-        "main"
+  "track": [
+    "main"
+  ],
+  "status": [
+    "Oral",
+    "Oral Workshop",
+    "Poster",
+    "Poster Workshop",
+    "Reject"
+  ],
+  "primary_area": [
+    ""
+  ],
+  "categories": {
+    "NLP": [
+      "11y_SldoumvZl",
+      "7hPJygSqJehqH",
+      "N_c1XDpyus_yP",
+      "idpCdOWtqXd60",
+      "msGKsXQXNiCBk"
     ],
-    "status": [
-        "Oral",
-        "Oral Workshop",
-        "Poster",
-        "Poster Workshop",
-        "Reject"
+    "CV": [
+      "0OR_OycNMzOF9",
+      "4UGuUZWZmi4Ze",
+      "KHMdKiX2lbguE",
+      "OznsOsb6sDFeV",
+      "OVyHViMbHRm8c",
+      "DD2gbWiOgJDmY",
+      "bI58OFtQlLOQ7",
+      "gGivgRWZsLgY0",
+      "aQZtOGDyp-Ozh",
+      "l_PClqDdLb5Bp",
+      "rOvg47Txgprkn",
+      "zzKhQhsTYlzAZ"
     ],
-    "primary_area": [
-        ""
+    "Video": [],
+    "Audio": [
+      "kk_XkMO0-dP8W"
+    ],
+    "Multimodal": [
+      "qEV_E7oCrKqWT"
+    ],
+    "Other": [
+      "-AIqBI4_qZAQ1",
+      "-4IA4WgNAy4Wx",
+      "0W7-W0EaA4Wak",
+      "2LzIDWSabfLe9",
+      "5Qbn4E0Njz4Si",
+      "4eEO5rd6xSevQ",
+      "6s2YsOZPYcb8N",
+      "7IOAIAx1AiEYC",
+      "7hXs7GzQHo-QK",
+      "9bFY3t2IJ19AC",
+      "ACBmCbico7jkg",
+      "BBIbj9w8Lvj8F",
+      "BmOABAaTQDmt2",
+      "OOuGtqpeK-cLI",
+      "G0OapcfeK3g_R",
+      "OpvgONa-3WODz",
+      "SSnY462CYz1Cu",
+      "PRuOK_LY_WPIq",
+      "TT0bFo9VZpFWg",
+      "UUwuUaQ5qRyWn",
+      "YBi6KFA7PfKo5",
+      "V_-8VUqv8h_H3",
+      "aJh-lFL2dFJ21",
+      "ZhGJ9KQlXi9jk",
+      "fm5jfAwPbOfP6",
+      "eQWJec0ursynH",
+      "i87JIQTAnB8AQ",
+      "jbLdjjxPd-b2l",
+      "mLr3In-nbamNu",
+      "rtGYtZ-ZKSMzk",
+      "tFbuFKWX3MFC8",
+      "ttxM6DQKghdOi",
+      "ttnAE7vaATtaK",
+      "yGgjGkkbeFSbt",
+      "yyC_7RZTkUD5-",
+      "zzEf5eKLmAG0o"
     ]
+  }
 }
