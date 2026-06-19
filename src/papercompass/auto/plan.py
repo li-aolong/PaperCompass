@@ -781,6 +781,8 @@ def render_plan(
                 "base_url": "https://api.openalex.org",
                 "api_key": "",
                 "api_key_env": "OPENALEX_API_KEY",
+                "mailto": "",
+                "mailto_env": "OPENALEX_EMAIL",
                 "page_size": 100,
                 "max_pages": 2,
                 "weak_max_pages": 1,

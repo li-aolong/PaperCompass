@@ -226,6 +226,37 @@ def test_sync_openalex_honors_query_level_page_size(tmp_path, monkeypatch) -> No
     assert "title.search%3ASeed+Title" in captured_urls[0]
 
 
+def test_sync_openalex_honors_api_key_and_mailto(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    captured_urls: list[str] = []
+
+    def fake_http_get_json(url, **kwargs):
+        captured_urls.append(url)
+        return {
+            "meta": {"count": 1, "next_cursor": ""},
+            "results": [],
+        }
+
+    monkeypatch.setattr("papercompass.discovery.http_get_json", fake_http_get_json)
+
+    sync_openalex(
+        workspace,
+        topic={"topic_id": "x", "min_year": 2024},
+        years=[2024],
+        queries=[{"text": "test", "modes": ["title"]}],
+        api_key="my_secret_key",
+        mailto="test@example.com",
+        page_size=10,
+        max_pages=1,
+        sleep_seconds=0,
+    )
+
+    assert captured_urls
+    assert "api_key=my_secret_key" in captured_urls[0]
+    assert "mailto=test%40example.com" in captured_urls[0]
+
+
 def test_sync_paperlists_writes_matching_cached_items(tmp_path) -> None:
     workspace = tmp_path / "topic"
     init_workspace(workspace, "topic")

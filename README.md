@@ -36,16 +36,60 @@
 
 ## 🚀 快速开始
 
-### 1. 安装
+### 1. 安装与便捷更新
 
-本项目推荐使用 [uv](https://github.com/astral-sh/uv) 进行环境管理：
+本项目推荐使用 [uv](https://github.com/astral-sh/uv) 进行环境与依赖管理。你可以通过以下方式安装，并保证未来更新的便捷性：
 
+#### 方式 A：直接本地运行
+适用于直接在项目目录内执行命令或通过 Agent 调用的场景。
 ```bash
-# 安装并同步依赖（包含向量化支持）
+# 1. 克隆项目并同步依赖（包含向量化支持）
+git clone https://github.com/li-aolong/PaperCompass.git
+cd PaperCompass
 uv sync --extra embed
+
+# 2. 后续更新旧版本时，只需执行：
+git pull && uv sync --extra embed
 ```
 
-### 2. 使用方法 (通过 AI Agent)
+#### 方式 B：全局快捷调用（推荐，支持便捷更新）
+为了在任意工作区目录下都能直接运行 `papercompass` 命令，推荐将其以 **可编辑模式（Editable Mode）** 安装为全局工具：
+```bash
+# 1. 在 PaperCompass 项目根目录下执行安装
+uv tool install --editable . --extra embed
+
+# 2. 安装后，你可以在系统的任意目录下直接全局调用：
+papercompass auto-build --direction "..."
+
+# 3. 当项目更新时，只需在 PaperCompass 项目根目录下执行：
+git pull && uv sync --extra embed
+# 由于是可编辑模式安装，全局命令会自动同步更新，无需重新安装！
+```
+
+### 2. 配置说明 (重要：OpenAlex / Brain 访问配置)
+
+本项目在文献检索阶段高度依赖 [OpenAlex](https://openalex.org) 服务。自 2026 年 2 月起，OpenAlex 接口已全面要求所有请求携带 **API Key**（旧的纯邮箱 Polite Pool 机制已不再有效）。
+
+*   **API Key 免费额度与费用**：
+    *   **每日免费 allowance**：每个注册并生成的免费 API Key 每天自带 **$1.00 的免费额度**（普通查询每 1,000 次约扣除 $0.1 ~ $1.0，日常单课题建库完全够用且免受限流）。
+*   **如何获取免费 API Key**：
+    1. 访问 [openalex.org](https://openalex.org) 注册/登录账号。
+    2. 进入 [API 设置页面 (openalex.org/settings/api)](https://openalex.org/settings/api) 免费生成 API Key。
+*   **如何配置 API Key**：
+    *   **方法一（推荐，全局环境变量）**：在系统 shell 中配置：
+        ```bash
+        export OPENALEX_API_KEY="your_api_key_here"
+        ```
+    *   **方法二（Workspace 局部配置）**：填入 Workspace 目录下的 `sources.yaml` 中：
+        ```yaml
+        discovery:
+          openalex:
+            api_key: "your_api_key_here"
+        ```
+
+*(注意：若需要使用大模型进行评分和复核，还需要根据 [AGENT_ENTRY.md](AGENT_ENTRY.md) 配置对应的 LLM 环境变量，如 `OPENAI_API_KEY`、`GEMINI_API_KEY` 等)*
+
+### 3. 使用方法 (通过 AI Agent)
 
 **最佳实践是让你的 AI Agent 来操作 PaperCompass。**
 请不要让 Agent 拿到一句模糊的需求就直接开跑，你可以这样向 Agent 提问：
@@ -57,10 +101,17 @@ uv sync --extra embed
 >
 > 请先给我确认信息，不要直接开始。"
 
-Agent 在确认需求后，会通过以下命令从仓库根目录启动流程：
+Agent 在确认需求后，会通过以下命令启动流程：
 
 ```bash
+# 如果使用方式 A（本地运行）：
 uv run --no-sync papercompass auto-build \
+  --direction "LLM 推理中的 speculative decoding" \
+  --min-year 2022 \
+  -v
+
+# 如果使用方式 B（全局快捷调用）：
+papercompass auto-build \
   --direction "LLM 推理中的 speculative decoding" \
   --min-year 2022 \
   -v

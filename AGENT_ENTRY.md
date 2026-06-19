@@ -52,30 +52,57 @@
 ⚠️ 请回复“**确认开始**”或指出需要修改的地方，我将在收到确认后执行命令。
 ```
 
+🚨 **OpenAlex API Key 检查与阻断机制（极重要）**：
+1. **主动检查**：在输出建库确认信前，检查系统环境变量中是否配置了 `OPENALEX_API_KEY`，或 Workspace 的 `sources.yaml` 中是否填入了 `api_key`。
+2. **阻断提示**：如果**未检测到** OpenAlex API Key，你**必须**在确认信下方追加以下提示，并**暂停执行**：
+   > 💡 **温馨提示**：检测到您当前未配置 OpenAlex API Key。自 2026 年 2 月起，OpenAlex 接口已全面要求 API Key。每个免费账户每天拥有 **$1 的免费额度**（对日常单课题建库非常充裕）。
+   > **建议获取步骤**：
+   > 1. 访问 [openalex.org](https://openalex.org) 注册/登录账号。
+   > 2. 进入 [API 设置页面 (openalex.org/settings/api)](https://openalex.org/settings/api) 免费生成 API Key。
+   > 3. **配置方式**：在您的 shell 环境中执行 `export OPENALEX_API_KEY="your_api_key_here"`，或将其填入 Workspace `sources.yaml` 中的 `discovery.openalex.api_key`。
+3. **放行条件**：只有当您收到以下两种回复之一时，才能继续推进到阶段 3：
+   *   用户已配置 API Key 并回复“**确认开始**”。
+   *   用户明确回复“**不需要配置 Key**”或“**直接继续**”（此时以无 Key 匿名状态继续尝试，但极易遭遇 403 阻断）。
+
 ### 🚀 阶段 3：执行命令 (Execution)
 
-用户明确同意后，请从**仓库根目录**执行操作。
+用户明确同意后，请从**仓库根目录**（或已全局安装 `papercompass` 的环境）执行操作。
 
-**环境初始化（如需）：**
-```bash
-uv sync --extra embed
-```
+**版本更新与环境初始化（如需）：**
+如果用户提到本地为旧版本或需要更新代码依赖，请按需执行：
+1. 直接在项目根目录下更新：
+   ```bash
+   git pull && uv sync --extra embed
+   ```
+2. 推荐提醒用户使用可编辑全局工具安装模式，以便未来随处调用和便捷自动更新：
+   ```bash
+   uv tool install --editable . --extra embed
+   ```
 
-**环境变量配置：**
-如果用户没有显式传 `--brain`，调用方必须暴露自己的身份：
-```bash
-export PAPERCOMPASS_CALLER_AGENT=<codex|claude|gemini|opencode|deepseek>
-```
-*(注意：主 Brain 选择优先级：用户 `--brain` > `PAPERCOMPASS_BRAIN` > `PAPERCOMPASS_CALLER_AGENT`。三者都没有时直接报错；PaperCompass 不按可用 plugin 预置顺序自动选择。仅在用户明确要求时才指定 `--brain` 或 `--second-brain`)*
+**环境变量配置（必须检查）：**
+1. **Brain 驱动配置**：如果用户没有显式传 `--brain`，调用方必须暴露自己的身份：
+   ```bash
+   export PAPERCOMPASS_CALLER_AGENT=<codex|claude|gemini|opencode|deepseek>
+   ```
+   *(注意：主 Brain 选择优先级：用户 `--brain` > `PAPERCOMPASS_BRAIN` > `PAPERCOMPASS_CALLER_AGENT`。三者都没有时直接报错；PaperCompass 不按可用 plugin 预置顺序自动选择。仅在用户明确要求时才指定 `--brain` 或 `--second-brain`)*
+2. **OpenAlex 访问配置（极重要）**：为防止因匿名频繁请求遭遇 HTTP 403 / 429 访问受限导致建库中断，请先检查本地是否配置了 `OPENALEX_EMAIL` 环境变量（进入免费礼貌池）或 `OPENALEX_API_KEY`（API 密钥）。如果均未配置，请务必友好提示用户在 shell 里配置，或者通过具体 workspace 的 `sources.yaml` 补充 `mailto` 参数。
 
 **正式运行命令：**
 使用用户确认后的字段组合命令（不要补默认年份，只使用确认过的值）：
-```bash
-uv run --no-sync papercompass auto-build \
-  --direction "<confirmed direction>" \
-  --min-year <confirmed_min_year> \
-  -v
-```
+*   如果使用本地运行模式：
+    ```bash
+    uv run --no-sync papercompass auto-build \
+      --direction "<confirmed direction>" \
+      --min-year <confirmed_min_year> \
+      -v
+    ```
+*   如果使用全局安装模式：
+    ```bash
+    papercompass auto-build \
+      --direction "<confirmed direction>" \
+      --min-year <confirmed_min_year> \
+      -v
+    ```
 - 若用户只要计划：加上 `--plan-only` 标志。
 - 若用户提供了最大远程调用预算：加上 `--max-remote-calls <num>`。
 

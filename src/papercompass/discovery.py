@@ -1170,6 +1170,7 @@ def sync_openalex(
     queries: list[dict[str, Any]],
     base_url: str = OPENALEX_API,
     api_key: str = "",
+    mailto: str = "",
     page_size: int = 100,
     max_pages: int = 2,
     weak_max_pages: int = 1,
@@ -1266,6 +1267,8 @@ def sync_openalex(
                                 params["sort"] = sort
                             if api_key:
                                 params["api_key"] = api_key
+                            if mailto:
+                                params["mailto"] = mailto
                             url = openalex_url(base_url, params)
                             try:
                                 data = http_get_json(
@@ -3146,6 +3149,10 @@ def run_discovery(
         api_key = clean_text(oa_cfg.get("api_key", ""))
         if api_key_env and not api_key:
             api_key = os.getenv(api_key_env, "")
+        mailto_env = clean_text(oa_cfg.get("mailto_env", ""))
+        mailto = clean_text(oa_cfg.get("mailto", ""))
+        if mailto_env and not mailto:
+            mailto = os.getenv(mailto_env, "")
         results.append(sync_openalex(
             workspace,
             topic,
@@ -3153,6 +3160,7 @@ def run_discovery(
             queries=openalex_query_specs(oa_cfg, topic),
             base_url=clean_text(oa_cfg.get("base_url", "")) or OPENALEX_API,
             api_key=api_key,
+            mailto=mailto,
             page_size=int(oa_cfg.get("page_size", 100)),
             max_pages=int(oa_cfg.get("max_pages", 2)),
             weak_max_pages=int(oa_cfg.get("weak_max_pages", 1)),
