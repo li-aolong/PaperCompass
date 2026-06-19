@@ -295,8 +295,48 @@ def test_seed_repair_does_not_ask_brain_for_extra_queries(tmp_path: Path):
 def test_brain_plugin_registry_lists_known_names():
     from papercompass.plugins.brain import _REGISTRY  # noqa: PLC2701 — testing registry shape
 
-    names = {cls.name for cls in _REGISTRY}
+    names = set(_REGISTRY)
     assert {"codex", "gemini", "claude"} <= names
+
+
+def test_select_brain_requires_explicit_or_caller(monkeypatch):
+    from papercompass.plugins.brain import BrainUnavailable, select_brain
+
+    monkeypatch.delenv("PAPERCOMPASS_BRAIN", raising=False)
+    monkeypatch.delenv("PAPERCOMPASS_CALLER_AGENT", raising=False)
+    with pytest.raises(BrainUnavailable, match="does not choose a default agent"):
+        select_brain()
+
+
+def test_select_brain_uses_caller_without_registry_fallback(monkeypatch):
+    import papercompass.plugins.brain as brain_mod
+    from papercompass.plugins.brain import BrainUnavailable, BrainPlugin, select_brain
+
+    class FakeUnavailableCodex(BrainPlugin):
+        name = "codex"
+        display = "codex"
+
+        @classmethod
+        def is_available(cls) -> bool:
+            return False
+
+    class FakeAvailableClaude(BrainPlugin):
+        name = "claude"
+        display = "claude"
+
+        @classmethod
+        def is_available(cls) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        brain_mod,
+        "_REGISTRY",
+        {"codex": FakeUnavailableCodex, "claude": FakeAvailableClaude},
+    )
+    monkeypatch.delenv("PAPERCOMPASS_BRAIN", raising=False)
+    monkeypatch.setenv("PAPERCOMPASS_CALLER_AGENT", "codex")
+    with pytest.raises(BrainUnavailable, match="codex.*not available"):
+        select_brain()
 
 
 def test_brain_plugin_retries_once_on_transient_error():

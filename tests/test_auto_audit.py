@@ -106,7 +106,7 @@ def test_select_audit_brain_explicit_wins(tmp_path: Path):
     ws = _ws_with_state(tmp_path, "deepseek")
     pref, mode, note, build_brain = select_audit_brain(
         workspace=ws, requested_brain="codex",
-        same_brain=False, available=["deepseek", "codex"],
+        same_brain=False,
     )
     assert pref == "codex"
     assert mode == "explicit_brain"
@@ -118,36 +118,36 @@ def test_select_audit_brain_same_brain_flag(tmp_path: Path):
     ws = _ws_with_state(tmp_path, "deepseek")
     pref, mode, _note, _build = select_audit_brain(
         workspace=ws, requested_brain=None,
-        same_brain=True, available=["deepseek", "codex"],
+        same_brain=True,
     )
-    assert pref is None
+    assert pref == "deepseek"
     assert mode == "same_brain_explicit"
 
 
-def test_select_audit_brain_cross_default_when_other_available(tmp_path: Path):
+def test_select_audit_brain_requires_explicit_brain(tmp_path: Path):
     from papercompass.cli import select_audit_brain
     ws = _ws_with_state(tmp_path, "deepseek")
     pref, mode, note, build_brain = select_audit_brain(
         workspace=ws, requested_brain=None,
-        same_brain=False, available=["deepseek", "codex"],
+        same_brain=False,
     )
-    assert pref == "codex"
-    assert mode == "cross_brain_default"
-    assert "build=deepseek" in note
+    assert pref is None
+    assert mode == "missing_audit_brain"
+    assert "does not choose a default audit agent" in note
     assert build_brain == "deepseek"
 
 
-def test_select_audit_brain_warns_on_same_brain_fallback(tmp_path: Path):
+def test_select_audit_brain_same_brain_requires_build_state(tmp_path: Path):
     from papercompass.cli import select_audit_brain
-    ws = _ws_with_state(tmp_path, "deepseek")
+    ws = tmp_path / "ws"
+    ws.mkdir()
     pref, mode, note, _build = select_audit_brain(
         workspace=ws, requested_brain=None,
-        same_brain=False, available=["deepseek"],
+        same_brain=True,
     )
-    assert pref is None  # detect_brain default
-    assert mode == "same_brain_fallback"
-    assert "WARNING" in note
-    assert "self-evaluation bias" in note
+    assert pref is None
+    assert mode == "missing_audit_brain"
+    assert "--same-brain requested" in note
 
 
 def test_select_audit_brain_handles_missing_state(tmp_path: Path):
@@ -157,9 +157,8 @@ def test_select_audit_brain_handles_missing_state(tmp_path: Path):
     ws.mkdir()
     pref, mode, _note, build_brain = select_audit_brain(
         workspace=ws, requested_brain=None,
-        same_brain=False, available=["codex"],
+        same_brain=False,
     )
-    # build_brain unknown → first available is fine (no exclusion)
-    assert pref == "codex"
-    assert mode == "cross_brain_default"
+    assert pref is None
+    assert mode == "missing_audit_brain"
     assert build_brain == ""

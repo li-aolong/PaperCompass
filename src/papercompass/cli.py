@@ -14,7 +14,7 @@ from .config import data_dir, ensure_workspace_dirs, init_workspace, load_source
 from .config import overrides_dir, resolve_template
 from .discovery import make_coverage_report, run_discovery
 from .fulltext import fetch_fulltext
-from .plugins import available_brains
+from .plugins import BrainUnavailable, available_brains
 from .qa import build_quality_report, refresh_final_summary_from_qa
 from .sources.arxiv import sync_arxiv
 from .text import clean_text, read_json
@@ -336,26 +336,29 @@ def cmd_auto_build(args: argparse.Namespace) -> None:
         model_variant=args.model_variant,
     )
     workspace = workspace_resolution.workspace
-    result = run_auto_build(
-        workspace,
-        direction,
-        brain=args.brain,
-        second_brain=args.second_brain,
-        min_year=workspace_resolution.min_year,
-        max_remote_calls=args.max_remote_calls,
-        refresh=args.refresh,
-        sources=args.sources,
-        weak_batch_size=args.weak_batch_size,
-        weak_max_batches=args.weak_max_batches,
-        boundary_max_batches=args.boundary_max_batches,
-        plan_only=args.plan_only,
-        verbose=args.verbose,
-        fresh=args.fresh,
-        topic_id_override=workspace_resolution.topic_id,
-        allow_no_embedding=args.allow_no_embedding,
-        prior_markdown=prior_markdown_text,
-        seed_cap=args.seed_cap,
-    )
+    try:
+        result = run_auto_build(
+            workspace,
+            direction,
+            brain=args.brain,
+            second_brain=args.second_brain,
+            min_year=workspace_resolution.min_year,
+            max_remote_calls=args.max_remote_calls,
+            refresh=args.refresh,
+            sources=args.sources,
+            weak_batch_size=args.weak_batch_size,
+            weak_max_batches=args.weak_max_batches,
+            boundary_max_batches=args.boundary_max_batches,
+            plan_only=args.plan_only,
+            verbose=args.verbose,
+            fresh=args.fresh,
+            topic_id_override=workspace_resolution.topic_id,
+            allow_no_embedding=args.allow_no_embedding,
+            prior_markdown=prior_markdown_text,
+            seed_cap=args.seed_cap,
+        )
+    except BrainUnavailable as exc:
+        raise SystemExit(f"papercompass auto-build: {exc}") from exc
     payload = result.to_dict()
     payload["workspace_contract"] = workspace_contract_summary(
         workspace,
@@ -514,20 +517,18 @@ def select_audit_brain(
     workspace: Path,
     requested_brain: str | None,
     same_brain: bool,
-    available: list[str],
 ) -> tuple[str | None, str, str, str]:
     """Decide which brain runs the audit's precision_sample stage.
 
     Returns (preference, audit_mode, audit_note, build_brain) where:
-      - preference: brain plugin name (or None to let detect_brain pick default)
+      - preference: explicit brain plugin name
       - audit_mode: one of "explicit_brain", "same_brain_explicit",
-                    "cross_brain_default", "same_brain_fallback"
+                    "missing_audit_brain"
       - audit_note: human-readable summary; empty if no note
       - build_brain: the brain recorded in state.json (or "")
 
-    Pure function — does not call detect_brain or write to stderr; the CLI
-    wraps this and emits the warning. Pulled out so the cross-brain
-    fallback decision is unit-testable without mocking subprocess.
+    Pure function — does not call detect_brain or write to stderr. PaperCompass
+    does not choose an audit brain from available plugins.
     """
     build_brain = ""
     state_path = workspace / ".papercompass" / "auto" / "state.json"
@@ -543,26 +544,22 @@ def select_audit_brain(
             f"audit brain explicitly set to {requested_brain}"
         ), build_brain
     if same_brain:
-        return None, "same_brain_explicit", (
-            "same-brain audit (--same-brain)"
+        if build_brain:
+            return build_brain, "same_brain_explicit", (
+                f"same-brain audit (--same-brain): audit={build_brain}"
+            ), build_brain
+        return None, "missing_audit_brain", (
+            "audit --same-brain requested, but build brain is unknown; "
+            "pass --brain <name> instead."
         ), build_brain
-    others = [b for b in available if b != build_brain]
-    if others:
-        chosen = others[0]
-        return chosen, "cross_brain_default", (
-            f"cross-brain audit: build={build_brain or 'unknown'}, audit={chosen}"
-        ), build_brain
-    return None, "same_brain_fallback", (
-        f"WARNING: no cross-model brain available "
-        f"(build={build_brain or 'unknown'}); falling back to same-brain "
-        f"audit (self-evaluation bias risk). Pass --same-brain to silence "
-        f"this warning, or install another brain plugin."
+    return None, "missing_audit_brain", (
+        "precision audit requires --brain <name> or --same-brain. "
+        "PaperCompass does not choose a default audit agent."
     ), build_brain
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
-    import sys as _sys
-    from .plugins import detect_brain, available_brains
+    from .plugins import detect_brain
     brain = None
     audit_mode = "skipped"
     audit_note = ""
@@ -572,11 +569,13 @@ def cmd_audit(args: argparse.Namespace) -> None:
             workspace=args.workspace,
             requested_brain=args.brain,
             same_brain=args.same_brain,
-            available=[b.name for b in available_brains()],
         )
-        if audit_mode == "same_brain_fallback":
-            _sys.stderr.write(f"papercompass audit: {audit_note}\n")
-        brain = detect_brain(preference)
+        if audit_mode == "missing_audit_brain":
+            raise SystemExit(f"papercompass audit: {audit_note}")
+        try:
+            brain = detect_brain(preference)
+        except BrainUnavailable as exc:
+            raise SystemExit(f"papercompass audit: {exc}") from exc
     result = audit_workspace(args.workspace, brain=brain, sample_size=args.sample_size)
     if isinstance(result, dict):
         result.setdefault("audit_mode", audit_mode)
@@ -818,7 +817,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto_p.add_argument(
         "--brain",
         default=None,
-        help="指定大脑 plugin (codex|gemini|claude|opencode|deepseek)；默认跟随 PAPERCOMPASS_CALLER_AGENT / env / 可用 plugin 自动选取",
+        help="指定大脑 plugin (codex|gemini|claude|opencode|deepseek)；未指定时只跟随 PAPERCOMPASS_BRAIN 或 PAPERCOMPASS_CALLER_AGENT，不自动选择",
     )
     auto_p.add_argument(
         "--second-brain",
@@ -909,12 +908,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit_p.add_argument(
         "--brain",
         default=None,
-        help="precision 抽样使用的 brain plugin；默认 cross-model（自动选与 build 用的不同的 brain）",
+        help="precision 抽样使用的 brain plugin；不指定则不自动选择，可用 --same-brain 使用 build brain",
     )
     audit_p.add_argument(
         "--same-brain",
         action="store_true",
-        help="禁用 cross-model 默认，改用 build 时的 brain（自评偏宽，慎用）",
+        help="显式使用 build 时记录的 brain（自评偏宽，慎用）",
     )
     audit_p.add_argument("--sample-size", type=int, default=30)
     audit_p.add_argument(

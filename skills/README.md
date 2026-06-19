@@ -6,7 +6,7 @@ PaperCompass 把面向 agent 的 3 个工作流封装成 skill，可以从任何
 |---|---|---|
 | [papercompass-build](papercompass-build/SKILL.md) | `/papercompass-build "speculative decoding"` | 端到端建库（plan → discover → review → catalog → qa） |
 | [papercompass-plan](papercompass-plan/SKILL.md) | `/papercompass-plan "speculative decoding"` | 只跑方向拆解，预览 brain 的 topic.yaml / sources.yaml 和可选 source-backed anchors 后退出 |
-| [papercompass-audit](papercompass-audit/SKILL.md) | `/papercompass-audit "<workspace>"` | 对已建库做 recall / precision 抽样审计（默认 cross-model） |
+| [papercompass-audit](papercompass-audit/SKILL.md) | `/papercompass-audit "<workspace>"` | 对已建库做 recall / precision 抽样审计（audit brain 由调用方或用户显式决定） |
 
 shared-references/ 里是跨 skill 复用的协议文档（brain plugin 接口、workspace 契约、effort levels）。给想加 brain plugin / 自定义工具的开发者。
 
@@ -30,7 +30,7 @@ cd "$PROJECT_ROOT"
 /papercompass-build "<direction>" — brain: gemini — min year: 2024
 /papercompass-build "<direction>" — workspace name: my-topic-id--2022plus
 /papercompass-plan  "<direction>" — brain: codex
-/papercompass-audit "<workspace>" — sample size: 50 — same brain: true
+/papercompass-audit "<workspace>" — sample size: 50 — brain: codex
 ```
 
 `workspace name` 应使用 `<topic_id>--<min_year>plus`。如果同一 topic 和年份窗口要并排保留多个正式主模型结果，才追加精确模型短名，例如 `--ds-v4-flash` 或 `--ds-v4-pro`。完整规范见 [shared-references/workspace-contract.md](shared-references/workspace-contract.md) 和 [../docs/workspace.md](../docs/workspace.md)。
@@ -61,8 +61,8 @@ ln -s "$(pwd)/skills/papercompass-audit"  ~/.claude/skills/papercompass-audit
 
 ```bash
 uv run --no-sync papercompass auto-build --direction "..." --min-year <confirmed_year> --brain codex
-uv run --no-sync papercompass auto-build --direction "..." --min-year <confirmed_year> --plan-only        # plan 等价
-uv run --no-sync papercompass audit      --workspace workspaces/<library_name>                # audit 等价
+uv run --no-sync papercompass auto-build --direction "..." --min-year <confirmed_year> --brain codex --plan-only  # plan 等价
+uv run --no-sync papercompass audit      --workspace workspaces/<library_name> --brain codex                 # audit 等价
 ```
 
 `uv run --no-sync papercompass brains list` 列出 PATH 上检测到的可用 brain plugin（codex / gemini / claude）。
@@ -74,7 +74,8 @@ PaperCompass 内部对每个 agent CLI 实现一个 plugin（subprocess + JSON s
 1. CLI flag `--brain codex|gemini|claude|opencode|deepseek` 强制指定
 2. 环境变量 `PAPERCOMPASS_BRAIN=codex`
 3. 环境变量 `PAPERCOMPASS_CALLER_AGENT=codex|claude|gemini|opencode|deepseek` 表示当前调用方 agent
-4. 都没有：按 registry 顺序选第一个可用 plugin
+
+三者都没有时命令失败。PaperCompass 不使用内部注册表或 PATH 可用性预置任何 agent 顺序；调用方 agent 需要自行决定并暴露身份，或让用户显式指定。
 
 要加新 brain（minimax / GLM / qwen 等）：[shared-references/brain-plugin-protocol.md](shared-references/brain-plugin-protocol.md)。
 

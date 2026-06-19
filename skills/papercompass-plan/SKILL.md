@@ -18,7 +18,7 @@ User direction: $ARGUMENTS
 - **PROJECT_ROOT**：当前仓库根目录。优先用 `git rev-parse --show-toplevel`，失败时用当前目录。
 - **PAPERCOMPASS**：默认从 `PROJECT_ROOT` 执行 `uv run --no-sync papercompass`。如果环境已激活或全局安装，也可以直接用 `papercompass`。
 - **WORKSPACES_ROOT**：由 CLI 默认解析为 `PROJECT_ROOT/workspaces`；不要写死 `/home/...` 或 `/Users/...`。
-- **BRAIN_SELECTION**：未显式指定时跟随调用方 agent。wrapper 能识别当前 agent 时应设置 `PAPERCOMPASS_CALLER_AGENT=<agent-name>`；用户显式传 `— brain:` 时才强制指定。
+- **BRAIN_SELECTION**：未显式指定时必须由调用方 agent 决定。wrapper 应设置 `PAPERCOMPASS_CALLER_AGENT=<agent-name>`；用户显式传 `— brain:` 时才强制指定。PaperCompass 自身不按可用 plugin 预置顺序兜底。
 
 推荐在执行命令前先设：
 
@@ -47,7 +47,7 @@ cd "$PROJECT_ROOT" && $PAPERCOMPASS auto-build \
   --plan-only
 ```
 
-只有用户显式传 `— brain:` 时才在命令中追加 `--brain {brain}`；否则不传，让 CLI 根据调用方 agent / 环境变量选择。
+只有用户显式传 `— brain:` 时才在命令中追加 `--brain {brain}`；否则先设置 `PAPERCOMPASS_CALLER_AGENT=<当前调用方 agent>`，再让 CLI 按该声明选择。
 
 ### Step 3: 给用户展示拆解结果
 

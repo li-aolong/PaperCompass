@@ -13,7 +13,7 @@ Target: $ARGUMENTS
 - **recall**：source-backed anchor/seed 列表有多少进了主库 / pending / rejected / 仍缺
 - **precision**：从主库随机抽 N 篇，让 brain 判 `in_scope / out_of_scope / boundary`
 
-默认走 **cross-model**：自动选择一个与 build brain 不同的可用 brain 做 precision 抽样。`--same-brain` 关闭这个行为。
+precision 抽样的 brain 必须由调用方或用户显式决定：传 `--brain <name>`，或传 `--same-brain` 使用 build 时记录的 brain。PaperCompass 不自动选择 cross-model brain。
 
 ## Runtime Detection
 
@@ -21,7 +21,7 @@ Target: $ARGUMENTS
 - **PAPERCOMPASS**：默认从 `PROJECT_ROOT` 执行 `uv run --no-sync papercompass`。如果环境已激活或全局安装，也可以直接用 `papercompass`。
 - **WORKSPACES_ROOT**：由 CLI 默认解析为 `PROJECT_ROOT/workspaces`；不要写死 `/home/...` 或 `/Users/...`。
 - **DEFAULT_SAMPLE_SIZE** = 30
-- **DEFAULT_BRAIN** = cross-model（自动选与 build brain 不同的可用 brain）
+- **AUDIT_BRAIN**：用户传 `— brain:` 时使用该值；用户传 `— same brain: true` 时使用 build brain；否则由调用该 skill 的 agent 自行决定并传 `--brain`，不能识别时先询问用户。
 
 推荐在执行命令前先设：
 
@@ -32,7 +32,7 @@ PAPERCOMPASS="uv run --no-sync papercompass"
 
 > 💡 Overrides:
 > - `— brain: codex` / `— brain: gemini`（强制指定 audit 用的 brain）
-> - `— same brain: true`（关闭 cross-model，让 build brain 自评，慎用）
+> - `— same brain: true`（显式让 build brain 自评，慎用）
 > - `— sample size: 50`（更大抽样）
 > - `— skip precision: true`（只算 source-backed anchor/seed recall，不调 brain）
 
@@ -52,7 +52,7 @@ PAPERCOMPASS="uv run --no-sync papercompass"
 cd "$PROJECT_ROOT" && $PAPERCOMPASS audit \
   --workspace {workspace_path} \
   --sample-size {sample_size} \
-  [--brain {brain}] [--same-brain] [--skip-precision]
+  [--brain {brain} | --same-brain] [--skip-precision]
 ```
 
 输出 JSON 到 stdout，并写到 `{workspace}/.papercompass/auto/audit_recall_precision.json`。

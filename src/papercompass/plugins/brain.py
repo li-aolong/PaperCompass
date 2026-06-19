@@ -757,13 +757,16 @@ class DeepSeekAPIPlugin(BrainPlugin):
         )
 
 
-_REGISTRY: list[type[BrainPlugin]] = [
-    ClaudePlugin,
-    CodexPlugin,
-    GeminiPlugin,
-    OpenCodePlugin,
-    DeepSeekAPIPlugin,
-]
+_REGISTRY: dict[str, type[BrainPlugin]] = {
+    cls.name: cls
+    for cls in (
+        ClaudePlugin,
+        CodexPlugin,
+        GeminiPlugin,
+        OpenCodePlugin,
+        DeepSeekAPIPlugin,
+    )
+}
 
 CALLER_AGENT_ENV = "PAPERCOMPASS_CALLER_AGENT"
 _CALLER_AGENT_ALIASES: dict[str, str] = {
@@ -790,42 +793,51 @@ def _caller_agent_brain() -> str | None:
 
 
 def available_brains() -> list[BrainPlugin]:
-    return [cls() for cls in _REGISTRY if cls.is_available()]
+    return [cls() for _name, cls in sorted(_REGISTRY.items()) if cls.is_available()]
 
 
 def detect_brain(preference: str | None = None) -> BrainPlugin:
-    """Return the first available brain. If `preference` matches a known plugin
-    name and is available, return that. Otherwise raise BrainUnavailable.
+    """Return the explicitly requested brain, or fail.
+
+    PaperCompass intentionally has no implicit provider order. Callers must pass
+    --brain, PAPERCOMPASS_BRAIN, or PAPERCOMPASS_CALLER_AGENT.
     """
-    if preference:
-        for cls in _REGISTRY:
-            if cls.name == preference:
-                if cls.is_available():
-                    return cls()
-                raise BrainUnavailable(f"requested brain '{preference}' is not available on PATH")
-        raise BrainUnavailable(f"unknown brain plugin '{preference}'")
-    for cls in _REGISTRY:
-        if cls.is_available():
-            return cls()
-    raise BrainUnavailable("no brain plugin available; install one of: codex, gemini, claude")
+    pref = (preference or "").strip().lower()
+    if not pref:
+        raise BrainUnavailable(
+            "no brain selected; pass --brain <name>, set PAPERCOMPASS_BRAIN, "
+            "or set PAPERCOMPASS_CALLER_AGENT. PaperCompass does not choose "
+            "a default agent."
+        )
+    cls = _REGISTRY.get(pref)
+    if cls is None:
+        known = ", ".join(sorted(_REGISTRY))
+        raise BrainUnavailable(f"unknown brain plugin '{pref}' (known: {known})")
+    if cls.is_available():
+        return cls()
+    raise BrainUnavailable(f"requested brain '{pref}' is not available on PATH")
 
 
 def select_brain(*, preference: str | None = None, env_var: str = "PAPERCOMPASS_BRAIN") -> BrainPlugin:
     """Selector priority: explicit CLI flag > PAPERCOMPASS_BRAIN env > caller-agent
     env (PAPERCOMPASS_CALLER_AGENT, set by the skill / SDK wrapper that knows
-    which agent invoked PaperCompass) > _REGISTRY PATH order (Claude first)."""
-    if preference:
+    which agent invoked PaperCompass). No implicit fallback order is used."""
+    if preference and preference.strip():
         return detect_brain(preference)
-    env_pref = os.environ.get(env_var)
+    env_pref = (os.environ.get(env_var) or "").strip()
     if env_pref:
         return detect_brain(env_pref)
+    caller_raw = os.environ.get(CALLER_AGENT_ENV, "").strip()
     caller_brain = _caller_agent_brain()
     if caller_brain:
-        try:
-            return detect_brain(caller_brain)
-        except BrainUnavailable:
-            pass
-    return detect_brain()
+        return detect_brain(caller_brain)
+    if caller_raw:
+        known_callers = ", ".join(sorted(_CALLER_AGENT_ALIASES))
+        raise BrainUnavailable(
+            f"unknown {CALLER_AGENT_ENV}='{caller_raw}' "
+            f"(known caller aliases: {known_callers})"
+        )
+    return detect_brain(None)
 
 
 def _strip_codex_chrome(out: str) -> str:

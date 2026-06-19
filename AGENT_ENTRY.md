@@ -62,11 +62,11 @@ uv sync --extra embed
 ```
 
 **环境变量配置：**
-如果你的运行框架支持，请主动暴露你的身份：
+如果用户没有显式传 `--brain`，调用方必须暴露自己的身份：
 ```bash
-export PAPERCOMPASS_CALLER_AGENT=<你的 Agent 名字>
+export PAPERCOMPASS_CALLER_AGENT=<codex|claude|gemini|opencode|deepseek>
 ```
-*(注意：主 Brain 选择优先级：用户 `--brain` > `PAPERCOMPASS_BRAIN` > `PAPERCOMPASS_CALLER_AGENT` > 本机可用 Plugin。仅在用户明确要求时才指定 `--brain` 或 `--second-brain`)*
+*(注意：主 Brain 选择优先级：用户 `--brain` > `PAPERCOMPASS_BRAIN` > `PAPERCOMPASS_CALLER_AGENT`。三者都没有时直接报错；PaperCompass 不按可用 plugin 预置顺序自动选择。仅在用户明确要求时才指定 `--brain` 或 `--second-brain`)*
 
 **正式运行命令：**
 使用用户确认后的字段组合命令（不要补默认年份，只使用确认过的值）：

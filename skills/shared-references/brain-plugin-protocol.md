@@ -102,10 +102,10 @@ PaperCompass 强制 OpenAI structured-output 风格（`additionalProperties: fal
 - CLI flag `--brain <name>` 强制指定
 - 环境变量 `PAPERCOMPASS_BRAIN=<name>`
 - 环境变量 `PAPERCOMPASS_CALLER_AGENT=<name>` 表示调用方 agent
-- 都没有：按 `_REGISTRY` 顺序选 PATH 上第一个 `is_available()` 的
+- 都没有：报错。PaperCompass 不按 `_REGISTRY` 或 PATH 可用性预置任何 agent 顺序。
 
 `papercompass brains list` 列出当前可用 plugin。
 
 ## Cross-model audit
 
-精度审计默认走 cross-model：自动选与 build brain 不同的可用 brain。`papercompass audit --same-brain` 关闭这个默认。详见 `workspace-contract.md` 的 audit 段。
+精度审计不自动选择 cross-model brain。调用方必须传 `papercompass audit --brain <name>`，或显式传 `--same-brain` 使用 build brain。详见 `workspace-contract.md` 的 audit 段。

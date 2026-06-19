@@ -65,7 +65,8 @@ workspaces/<topic_id>--<min_year>plus/
 1. `--brain <name>`
 2. `PAPERCOMPASS_BRAIN=<name>`
 3. `PAPERCOMPASS_CALLER_AGENT=<name>`
-4. 自动选择本机可用 plugin
+
+三者都没有时命令失败。PaperCompass 不按本机可用 plugin 预置顺序自动选择；调用它的 agent 应自行决定并设置 `PAPERCOMPASS_CALLER_AGENT`，或由用户显式指定 `--brain` / `PAPERCOMPASS_BRAIN`。
 
 查看可用项：
 

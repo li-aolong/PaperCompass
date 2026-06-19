@@ -129,13 +129,14 @@ PaperCompass auto-build 在指定 workspace 下产生固定的目录结构。本
 
 不要读 `data/pending_review_candidates.json` / `rejected_candidates.json` 当作"完整库"；它们是流程中间产物，下一次 build 可能消失。
 
-## audit / 跨 brain
+## audit / brain 选择
 
-`papercompass audit --workspace <ws>` 默认 cross-model：
+`papercompass audit --workspace <ws>` 不自动选择 precision brain：
 
 - 读 `.papercompass/auto/state.json` 拿到 build 时用的 `brain`
-- 自动选 `available_brains()` 中第一个不同的 brain 做 precision 抽样
-- `--same-brain` 关闭这个默认（自评偏宽，慎用）
+- `--brain <name>` 显式指定 precision 抽样 brain
+- `--same-brain` 显式使用 build brain（自评偏宽，慎用）
+- 两者都没有且未跳过 precision 时命令失败
 - 输出写到 `.papercompass/auto/audit_recall_precision.json`
 
 precision 是 brain 抽样判断，**不是**ground truth。recall 只针对 source-backed anchor/seed 列表做精确匹配；列表为空时表示没有硬召回锚点，不代表库失败。
