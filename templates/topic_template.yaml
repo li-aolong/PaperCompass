@@ -1,0 +1,102 @@
+# Topic 配置模板（注释版）
+#
+# 这个文件**不是**运行时模板（运行时 plan render 直接生成 topic.yaml）；它是
+# 给人看的参考。auto-build 跑完后你会得到结构相同的 topic.yaml；如果你想手
+# 工改规则不重跑 brain，对着这个文件确认每个字段语义。
+#
+# 完整产物请在本机通过 auto-build 生成到 workspaces/<library_name>/；GitHub 仓库不携带 examples/。
+
+topic_id: spec-decoding-llm           # lower-case kebab-case slug
+name: Speculative Decoding for LLMs    # 给人看的名字
+description: >                          # 一段简短描述（< 400 字）
+  Lossless inference acceleration for
+  autoregressive LLMs via draft-and-verify ...
+min_year: 2022                          # 收录论文最早年份；早于此值丢 rejected
+
+subtopics:                              # 子方向，仅做标签，不影响召回
+  - draft-and-verify
+  - self-speculative
+  - tree-of-drafts
+  - retrieval-based
+
+# ──────────────────────────────────────────────────────────────────────────
+# 召回 / 分类规则（最关键的 5 块）
+# ──────────────────────────────────────────────────────────────────────────
+
+strong_keywords:                        # 命中 → 主库（+ title-focus 检查）
+  - speculative decoding                # 2-3 词 canonical 短语
+  - speculative sampling
+  - draft model                         # 名字越短匹配越宽，配合 negative 慎用
+  # named methods（短代号）也放这里：
+  - Medusa
+  - EAGLE
+  - SpecInfer
+
+weak_keywords:                          # 命中但未中 strong → pending（让 brain 复核）
+  - LLM inference acceleration
+  - parallel decoding
+  - assisted generation
+
+# 正则 patterns —— 比 keyword term 更精确；plan render 会自动从 strong_keywords
+# 派生 strict_patterns / title_focus_patterns，所以下面通常不必手写
+strict_patterns:
+  - "\\bspeculative[\\s\\-]+decoding\\b"
+  - "\\bspeculative[\\s\\-]+sampling\\b"
+
+soft_patterns:                          # weak_keywords 的正则版
+  - "\\bllm[\\s\\-]+inference\\b"
+
+negative_patterns:                      # 命中即排除（rejected）
+  - "\\bspeculative[\\s\\-]+execution[\\s\\-]+processor\\b"
+  - "\\bbranch[\\s\\-]+prediction\\b"
+  - "\\bMedusa[\\s\\-]+medical[\\s\\-]+imaging\\b"
+  - "\\bSequoia[\\s\\-]+continual[\\s\\-]+learning\\b"
+
+title_focus_patterns:                   # 题名必须命中其中之一才进 strong（avoid 摘要噪声）
+  - "\\bspeculative[\\s\\-]+decoding\\b"
+  - "\\bspeculative[\\s\\-]+sampling\\b"
+
+# ──────────────────────────────────────────────────────────────────────────
+# Strong 风险审计（v0.2 加入）
+# ──────────────────────────────────────────────────────────────────────────
+# 当一篇论文中 strong 规则但又中了下面的 pattern，被 flag 进 strong_risk_review
+# 队列让 brain 决定 keep_in_main / remove_from_main。常见用例：跨模态 / 跨域
+# 应用方法到非核心场景（speculative decoding for protein generation 等）。
+
+strong_audit_patterns:
+  - "\\bprotein[\\s\\-]+generation\\b"
+  - "\\bverilog[\\s\\-]+generation\\b"
+  - "\\bedge[\\s\\-]+device\\b"
+
+# ──────────────────────────────────────────────────────────────────────────
+# 检索时辅助
+# ──────────────────────────────────────────────────────────────────────────
+
+search_queries:                         # 用于 search 命令模糊查找；不影响 build
+  - speculative decoding
+  - draft model verification
+
+arxiv_queries:                          # 给 arxiv source 用的精确 query；plan render 自动写
+  - 'all:"speculative decoding"'
+  - 'all:"speculative sampling"'
+
+# ──────────────────────────────────────────────────────────────────────────
+# 客观 tag 规则（不影响收录，仅用于 catalog 切片）
+# ──────────────────────────────────────────────────────────────────────────
+
+datasets:
+  - MT-Bench
+  - HumanEval
+
+venues:                                  # paperlists / 元数据展示用
+  - acl
+  - emnlp
+  - iclr
+
+tag_rules:
+  - tag: paper_type:dataset_or_benchmark
+    patterns:
+      - "\\bbenchmark\\b"
+  - tag: subtopic:tree-of-drafts
+    patterns:
+      - "\\btree[\\s\\-]+of[\\s\\-]+drafts\\b"

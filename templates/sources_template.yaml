@@ -1,0 +1,150 @@
+# Sources 配置模板（注释版）
+#
+# auto-build 渲染出的 sources.yaml 结构和这个文件一致。如果你想跳过 brain plan
+# 直接手写 source 配置，对照本文件。
+#
+# 完整产物请在本机通过 auto-build 生成到 workspaces/<library_name>/；GitHub 仓库不携带 examples/。
+
+# ──────────────────────────────────────────────────────────────────────────
+# sync source（papercompass sync --source arxiv 用的）
+# ──────────────────────────────────────────────────────────────────────────
+sources:
+  arxiv:
+    enabled: true
+    type: arxiv
+    max_results: 35
+    sort_by: [relevance, submittedDate]
+    sleep_seconds: 0.35
+    timeout: 35
+    queries:
+      - 'all:"speculative decoding"'
+      - 'all:"speculative sampling"'
+
+# ──────────────────────────────────────────────────────────────────────────
+# discovery（papercompass discover 用的；auto-build 默认走这里）
+# ──────────────────────────────────────────────────────────────────────────
+discovery:
+  max_remote_calls: 120                # cache hit 不计入；预算耗尽 graceful skip
+  sources: [paperlists, openalex, crossref, dblp, arxiv]
+
+  paperlists:
+    venues: [acl, emnlp, naacl, coling, iclr, icml, nips]
+
+  openalex:
+    base_url: "https://api.openalex.org"
+    api_key: ""
+    api_key_env: "OPENALEX_API_KEY"     # 推荐用 env，不要硬编码 key
+    page_size: 100
+    max_pages: 2                        # strong query 抓 2 页
+    weak_max_pages: 1
+    modes: [exact]                      # 也可以加 search / semantic
+    sorts: [relevance]
+    topic_ids: []                       # 若你确知某 OpenAlex Topic ID 锚定本方向
+                                        # （如 GEC 的 T10181），填这里。否则空。
+    queries:
+      - text: "speculative decoding"
+        strength: strong
+      - text: "Medusa"
+        strength: strong
+      - text: "LLM inference acceleration"
+        strength: weak
+
+  crossref:
+    base_url: "https://api.crossref.org"
+    mailto: ""                         # 可选；设置后进入 Crossref polite pool
+    mailto_env: "OPENALEX_EMAIL"
+    page_size: 25
+    max_pages: 1
+    max_results: 50
+    queries:
+      - "speculative decoding"
+      - "LLM inference acceleration"
+
+  dblp:
+    base_url: "https://dblp.org/search/publ/api"
+    page_size: 25
+    max_pages: 1
+    max_results: 50
+    queries:
+      - "speculative decoding"
+      - "LLM inference acceleration"
+
+  acl_anthology:
+    base_url: "https://raw.githubusercontent.com/acl-org/acl-anthology/master/data/xml"
+    venues: [acl, emnlp, naacl, eacl, coling]
+    sleep_seconds: 0.25
+
+  europepmc:
+    base_url: "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    page_size: 25
+    max_pages: 1
+    max_results: 50
+    queries:
+      - "clinical language model"
+
+  pubmed:
+    base_url: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    api_key: ""
+    api_key_env: "NCBI_API_KEY"
+    page_size: 20
+    max_results: 30
+    queries:
+      - "clinical language model"
+
+  openreview:
+    base_url: "https://api2.openreview.net"
+    invitations: []                    # 例如 ICLR.cc/2026/Conference/-/Submission
+    limit: 50
+    max_pages: 1
+
+  # Semantic Scholar 是显式 opt-in 补充源；没有 key 时不要默认启用。
+  semanticscholar:
+    mode: bulk
+    year_strategy: range
+    max_pages: 1
+    page_size: 100
+    sleep_seconds: 6.0                  # 严格遵守，否则被 ban
+    no_key_sleep_seconds: 6.0
+    sorts: [citationCount:desc, publicationDate:desc]
+    base_url: "https://api.semanticscholar.org/graph/v1"
+    api_key: ""
+    api_key_env: "SEMANTIC_SCHOLAR_API_KEY"  # 当前项目默认空（无 key 模式）
+    queries:
+      - '"speculative decoding"'
+      - '("Medusa" | "EAGLE" | "SpecInfer")'
+
+  arxiv:
+    max_results: 120
+    page_size: 100
+    sleep_seconds: 3.2
+    sort_by: relevance
+    queries:
+      - 'all:"speculative decoding"'
+      - 'all:"speculative sampling"'
+
+  # ────────────────────────────────────────────────────────────────────────
+  # gemini_search (optional, opt-in only — disabled by default)
+  #
+  # Adds Google Search grounding via the `gemini` CLI as a 5th discovery
+  # source. Useful when paperlists / OpenAlex / arXiv miss long-tail venues
+  # or very recent papers. Hallucination risk is non-zero, so results
+  # default to `strength: weak` and go through the normal weak_review.
+  #
+  # Three guards must all be satisfied for sync_gemini_search to actually
+  # run:
+  #   (1) "gemini_search" listed in `discovery.sources` above
+  #   (2) `enabled: true` here
+  #   (3) `gemini` CLI on PATH
+  # Any of those failing → graceful skip with status:"skipped_no_cli" / etc.
+  #
+  # Each query consumes ONE remote_call from `discovery.max_remote_calls`,
+  # regardless of how many papers come back.
+  # ────────────────────────────────────────────────────────────────────────
+  # gemini_search:
+  #   enabled: false
+  #   max_results_per_query: 15
+  #   max_queries: 6
+  #   timeout: 300
+  #   queries:
+  #     - "long-tail Chinese GEC datasets 2024 2025"
+  #     - "non-English grammatical error correction benchmarks"

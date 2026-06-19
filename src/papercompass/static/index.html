@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PaperCompass</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <script defer src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-row">
+          <div class="brand-mark">PC</div>
+          <div>
+            <div class="brand-name">PaperCompass</div>
+            <div class="brand-topic" id="topicLabel">workspace</div>
+          </div>
+        </div>
+
+        <nav class="side-nav" aria-label="workspace navigation">
+          <button class="nav-item active" id="libraryNav" data-view="library" type="button">
+            <i data-lucide="library"></i>
+            <span>Library</span>
+          </button>
+          <button class="nav-item" id="buildNav" data-view="build" type="button">
+            <i data-lucide="activity"></i>
+            <span>Build</span>
+          </button>
+        </nav>
+
+        <section class="sidebar-section">
+          <div class="section-title">Research Direction</div>
+          <label class="workspace-picker">
+            <span>Workspace</span>
+            <select id="workspaceSelect"></select>
+          </label>
+          <div class="small-text" id="workspacePath">-</div>
+        </section>
+
+        <section class="sidebar-section">
+          <div class="section-title">Overview</div>
+          <div class="metric-list">
+            <div class="metric-row">
+              <span>Papers</span>
+              <strong id="paperCount">-</strong>
+            </div>
+            <div class="metric-row">
+              <span>Fulltext</span>
+              <strong id="fulltextCount">-</strong>
+            </div>
+            <div class="metric-row">
+              <span>.raw</span>
+              <strong id="rawCount">-</strong>
+            </div>
+            <div class="metric-row">
+              <span>Years</span>
+              <strong id="yearRange">-</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="sidebar-section">
+          <div class="section-title">Catalog</div>
+          <div class="small-text" id="catalogBuiltAt">-</div>
+        </section>
+      </aside>
+
+      <main class="content">
+        <header class="topbar" id="libraryTopbar">
+          <form id="searchForm" class="search-form">
+            <i data-lucide="search" aria-hidden="true"></i>
+            <input id="searchInput" type="search" autocomplete="off" placeholder="Search title, tag, author, abstract" />
+            <button class="icon-button primary" type="submit">
+              <i data-lucide="arrow-right"></i>
+              <span>Search</span>
+            </button>
+          </form>
+
+          <div class="filter-bar">
+            <label>
+              <span>Year</span>
+              <select id="yearFilter"></select>
+            </label>
+            <label>
+              <span>Tag</span>
+              <select id="keywordFilter"></select>
+            </label>
+            <label>
+              <span>Venue</span>
+              <select id="venueFilter"></select>
+            </label>
+            <label>
+              <span>Sort</span>
+              <select id="sortMode">
+                <option value="relevance">Relevance</option>
+                <option value="recent">Recent</option>
+                <option value="cited">Cited</option>
+              </select>
+            </label>
+            <button class="icon-button" id="resetButton" type="button">
+              <i data-lucide="rotate-ccw"></i>
+              <span>Reset</span>
+            </button>
+          </div>
+
+          <div class="active-summary" id="activeSummary">All papers</div>
+        </header>
+
+        <section class="main-grid" id="libraryView">
+          <div class="results-pane">
+            <div class="pane-head">
+              <div>
+                <h1>Library</h1>
+                <span id="resultCount">-</span>
+              </div>
+            </div>
+            <div class="results-list" id="resultsList"></div>
+          </div>
+
+          <article class="detail-pane" id="detailPane">
+            <div class="empty-state">
+              <i data-lucide="file-search"></i>
+              <h2>Paper Detail</h2>
+            </div>
+          </article>
+        </section>
+
+        <section class="build-view hidden" id="buildView">
+          <div class="build-head">
+            <div>
+              <h1>Build</h1>
+              <p id="buildDirection">-</p>
+            </div>
+            <div class="status-row">
+              <span class="status-pill" id="buildStatus">-</span>
+              <span class="status-pill" id="buildSafe">-</span>
+            </div>
+          </div>
+
+          <div class="build-metrics">
+            <div class="build-metric">
+              <span>Papers</span>
+              <strong id="buildPapers">-</strong>
+            </div>
+            <div class="build-metric">
+              <span>Anchors</span>
+              <strong id="buildAnchors">-</strong>
+            </div>
+            <div class="build-metric">
+              <span>Pending</span>
+              <strong id="buildPending">-</strong>
+            </div>
+            <div class="build-metric">
+              <span>Rejected</span>
+              <strong id="buildRejected">-</strong>
+            </div>
+            <div class="build-metric">
+              <span>Seeds</span>
+              <strong id="buildSeeds">-</strong>
+            </div>
+          </div>
+
+          <div class="build-grid">
+            <section class="build-panel">
+              <div class="panel-title">
+                <i data-lucide="workflow"></i>
+                <h2>Stages</h2>
+              </div>
+              <div class="stage-list" id="stageList"></div>
+            </section>
+
+            <section class="build-panel">
+              <div class="panel-title">
+                <i data-lucide="shield-check"></i>
+                <h2>Quality</h2>
+              </div>
+              <div class="quality-grid" id="qualityGrid"></div>
+              <div class="detail-section">
+                <h3>Warnings</h3>
+                <div class="tag-row" id="buildWarnings"></div>
+              </div>
+            </section>
+
+            <section class="build-panel">
+              <div class="panel-title">
+                <i data-lucide="radio-tower"></i>
+                <h2>Signals</h2>
+              </div>
+              <div class="info-grid" id="signalGrid"></div>
+            </section>
+
+            <section class="build-panel">
+              <div class="panel-title">
+                <i data-lucide="folder-kanban"></i>
+                <h2>Artifacts</h2>
+              </div>
+              <div class="artifact-list" id="artifactList"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

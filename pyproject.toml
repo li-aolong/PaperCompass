@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "papercompass"
+version = "0.1.0"
+description = "Build local topic-specific paper libraries for LLM-assisted literature review."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "PaperCompass contributors" }
+]
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "PyYAML>=6.0"
+]
+
+[project.optional-dependencies]
+# Sentence-transformers powers the embedding channel of the v3 fusion
+# scorer. Without it, fusion redistributes weight to brain + metadata
+# (no silent zeros) but library coverage is lower and brain budget can
+# no longer be focused on the top-K by similarity.
+embed = [
+  "sentence-transformers>=2.2"
+]
+dev = [
+  "pytest>=8"
+]
+
+[project.scripts]
+papercompass = "papercompass.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+papercompass = ["static/*.html", "static/*.css", "static/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-m 'not smoke'"
+markers = [
+  "smoke: end-to-end sanity tests that invoke real CLIs and cost real tokens; opt-in via `pytest -m smoke`",
+]
