@@ -11,7 +11,7 @@
 
 *把模糊的研究方向，变成可搜索、可审查、可复用的高质量本地论文库。*
 
-[文档导航](docs/README.md) · [给 Agent 的入口](AGENT_ENTRY.md) · [报告 Bug](#)
+[文档导航](docs/README.md) · [给 Agent 的入口](AGENT_ENTRY.md) · [报告 Bug](https://github.com/li-aolong/PaperCompass/issues)
 
 </div>
 
