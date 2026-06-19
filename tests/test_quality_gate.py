@@ -36,6 +36,26 @@ def test_review_queue_gate_distinguishes_budget_only_overflow() -> None:
     assert diagnosis["uncovered_count"] == 25
 
 
+def test_large_clean_queue_is_budget_not_rule_repair() -> None:
+    # A large queue with real (non-generic) topic hits is a budget problem
+    # (raise --weak-max-batches), not a broken-topic rule_repair.
+    pending = [
+        {
+            "title": f"Paper {idx}",
+            "topic_signals": {"topic_signal_hits": ["in context learning task vector"]},
+            "sources": ["openreview"],
+        }
+        for idx in range(1200)
+    ]
+
+    diagnosis = diagnose_review_queue(pending, batch_size=25, max_batches=20)
+
+    assert diagnosis["status"] == "partial_due_to_budget"
+    assert "weak_queue_too_large" in diagnosis["reason_codes"]
+    assert "generic_anchor_dominates" not in diagnosis["reason_codes"]
+    assert diagnosis["recommended_max_batches"] == 48
+
+
 def test_review_queue_gate_treats_latent_space_as_generic_anchor() -> None:
     pending = [
         {

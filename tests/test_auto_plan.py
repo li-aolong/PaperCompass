@@ -259,6 +259,46 @@ def test_latent_agent_cross_axis_terms_are_added_generically():
     assert any("latent" in query.lower() and "communication" in query.lower() for query in arxiv_queries)
 
 
+def test_out_of_scope_agent_mention_does_not_inject_multi_agent_bridge_terms():
+    # "agent" appears ONLY inside the out-of-scope clause; axis detection must
+    # not treat this in-context-learning topic as an agent topic and inject
+    # unrelated multi-agent bridge queries (regression for the ICL build).
+    direction = (
+        "In-context learning in large language models: how LLMs learn from "
+        "demonstrations without parameter updates, including implicit gradient "
+        "descent and task vectors. Out-of-scope: in-context reinforcement "
+        "learning or agent online adaptation."
+    )
+    terms = recall_terms_for_plan(
+        ["in-context learning demonstrations", "task vectors function vectors"],
+        "in-context learning, few-shot demonstrations, induction heads.",
+        ["in-context learning", "task vector"],
+        direction=direction,
+    )
+    joined = " ".join(terms).lower()
+    assert "latent communication" not in joined
+    assert "multi agent" not in joined
+    assert "kv cache communication" not in joined
+
+
+def test_generic_meta_terms_are_not_standalone_recall_anchors():
+    # "scaling laws" / "bayesian inference" must not become bare recall anchors
+    # (they flooded the ICL build), while topic-specific terms survive.
+    terms = recall_terms_for_plan(
+        [
+            "scaling laws emergence of in-context learning ability",
+            "in-context learning demonstration selection",
+        ],
+        "In-context learning, scaling laws, Bayesian inference interpretation of in-context learning.",
+        ["in-context learning", "demonstration selection"],
+        direction="In-context learning in large language models.",
+    )
+    low = [t.lower() for t in terms]
+    assert "scaling laws" not in low
+    assert "bayesian inference" not in low
+    assert any("in-context learning" in t or "in context learning" in t for t in low)
+
+
 def test_query_generation_prioritizes_core_recall_terms_before_cap():
     terms = [f"generic method family {idx}" for idx in range(20)] + [
         "latent reasoning language model",

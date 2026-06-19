@@ -826,6 +826,9 @@ def stage_score_papers(
             + [i for i in range(len(candidates)) if i not in protected_set]
         )[: min(rerank_top_k, len(candidates))]
     top_k_candidates = [candidates[i] for i in top_k_indices]
+    total_batches = (len(top_k_candidates) + batch_size - 1) // max(batch_size, 1)
+    if max_batches is not None:
+        total_batches = min(total_batches, max_batches)
 
     for batch_idx, batch in enumerate(_chunked(top_k_candidates, batch_size)):
         if max_batches is not None and batch_idx >= max_batches:
@@ -870,7 +873,7 @@ def stage_score_papers(
         # process (codex/opencode CLI subprocesses can block stdout for
         # tens of seconds while the model thinks).
         state._log_progress(
-            f"[score_papers] batch {batch_idx+1}/{batches_done} brain done "
+            f"[score_papers] batch {batch_idx+1}/{total_batches} brain done "
             f"in {result['duration']:.1f}s, scores={len(result['scores'])}"
         )
         if result.get("error"):
@@ -907,7 +910,7 @@ def stage_score_papers(
                 },
             )
             state._log_progress(
-                f"[score_papers] batch {batch_idx+1}/{batches_done} retry "
+                f"[score_papers] batch {batch_idx+1}/{total_batches} retry "
                 f"for {len(missing_for_retry)} missing keys done in "
                 f"{retry_result['duration']:.1f}s, scores={len(retry_result['scores'])}"
             )
@@ -1169,6 +1172,9 @@ def stage_resolve_boundary(
                 f"[resolve_boundary] resumed from {resolve_partial_path.name}: "
                 f"{loaded} cached second-brain scores"
             )
+    total_batches = (len(boundary_candidates) + batch_size - 1) // max(batch_size, 1)
+    if max_batches is not None:
+        total_batches = min(total_batches, max_batches)
     for batch_idx, batch in enumerate(_chunked(boundary_candidates, batch_size)):
         if max_batches is not None and batch_idx >= max_batches:
             break
@@ -1204,7 +1210,7 @@ def stage_resolve_boundary(
             extra={"batch": batch_idx, "batch_size": len(batch), "error": (result.get("error") or "")[:300], **(result.get("usage") or {})},
         )
         state._log_progress(
-            f"[resolve_boundary] batch {batch_idx+1}/{batches_done} brain done "
+            f"[resolve_boundary] batch {batch_idx+1}/{total_batches} brain done "
             f"in {result['duration']:.1f}s, scores={len(result['scores'])}"
         )
         if result.get("error"):
@@ -1241,7 +1247,7 @@ def stage_resolve_boundary(
                 },
             )
             state._log_progress(
-                f"[resolve_boundary] batch {batch_idx+1}/{batches_done} retry "
+                f"[resolve_boundary] batch {batch_idx+1}/{total_batches} retry "
                 f"for {len(missing_for_retry)} missing keys done in "
                 f"{retry_result['duration']:.1f}s, scores={len(retry_result['scores'])}"
             )

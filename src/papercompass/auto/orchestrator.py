@@ -186,11 +186,15 @@ HARD_ENVIRONMENT_WARNINGS = {
     "embedding_missing_with_capped_brain_budget",
 }
 
+# Ceiling on auto-raising the weak-review batch budget. needed<=ceiling auto-
+# raises and proceeds; beyond it, the gate reports a budget condition (not a
+# rule-repair) with an actionable --weak-max-batches recommendation.
+WEAK_BATCHES_AUTORAISE_CEILING = 80
+
 RULE_REPAIR_WARNINGS = {
     "no_brain_boundary_scores",
     "core_seed_misplaced",
     "anchor_seed_misplaced",
-    "weak_queue_too_large",
     "generic_anchor_dominates",
 }
 
@@ -206,6 +210,7 @@ BUDGET_WARNINGS = {
     "score_papers_has_deferred",
     "recall_pool_underpowered",
     "weak_batches_over_budget",
+    "weak_queue_too_large",
 }
 
 SOURCE_RETRY_WARNINGS = {
@@ -712,6 +717,29 @@ def run_auto_build(
     )
     pending_count = len(pending_after) if isinstance(pending_after, list) else 0
     needed_batches = (pending_count + weak_batch_size - 1) // max(weak_batch_size, 1)
+    # Auto-raise the brain review budget to cover a reviewable queue instead of
+    # hard-stopping on a too-small default. Bounded by a ceiling so a genuinely
+    # loose topic still surfaces (via generic-anchor dominance in the gate)
+    # rather than burning unbounded brain cost. This is what turns the common
+    # "default --weak-max-batches too small" case from an exit-5 failure into a
+    # transparent, successful run.
+    if (
+        weak_max_batches is not None
+        and needed_batches > weak_max_batches
+        and needed_batches <= WEAK_BATCHES_AUTORAISE_CEILING
+    ):
+        state.event(
+            "weak_budget_autoraised",
+            message=(
+                f"pending={pending_count} needs {needed_batches} review batches; "
+                f"raising --weak-max-batches {weak_max_batches} -> {needed_batches} "
+                "to cover the queue"
+            ),
+            previous_max_batches=weak_max_batches,
+            raised_to=needed_batches,
+            pending_count=pending_count,
+        )
+        weak_max_batches = needed_batches
     effective_max_batches = (
         min(needed_batches, weak_max_batches)
         if weak_max_batches is not None

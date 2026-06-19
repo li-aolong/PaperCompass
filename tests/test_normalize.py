@@ -10,6 +10,7 @@ All keyword/pattern-based precision logic moved to the fusion stage.
 """
 
 from papercompass.normalize import (
+    canonical_venue,
     deduplicate_papers,
     identity_keys,
     normalize_raw_candidate,
@@ -133,3 +134,53 @@ def test_source_library_id_prevents_overmerge():
         },
     ]
     assert len(deduplicate_papers(papers)) == 2
+
+
+def _anthology_record():
+    return {
+        "title": "Divide, Reweight, and Conquer",
+        "year": 2026,
+        "venue": "EACL",
+        "ids": {"acl": "2026.eacl-11"},
+        "acl_id": "2026.eacl-11",
+        "sources": ["acl_anthology"],
+        "source_records": [{"source_name": "acl_anthology", "venue_raw": "EACL"}],
+    }
+
+
+def _paperlists_reject_record():
+    return {
+        "title": "Divide, Reweight, and Conquer",
+        "year": 2026,
+        "venue": "ICLR",
+        "status": "Reject",
+        "ids": {"openreview": "abc123"},
+        "openreview_id": "abc123",
+        "sources": ["paperlists"],
+        "source_records": [{"source_name": "paperlists", "venue_raw": "ICLR"}],
+    }
+
+
+def test_published_venue_wins_over_rejected_submission_regardless_of_order():
+    # Same paper from ACL Anthology (published) + paperlists OpenReview (Reject).
+    # Merge must be order-independent: venue=EACL, status=published.
+    for order in ([_paperlists_reject_record(), _anthology_record()],
+                  [_anthology_record(), _paperlists_reject_record()]):
+        result = deduplicate_papers(order)
+        assert len(result) == 1
+        paper = result[0]
+        assert paper["venue"] == canonical_venue("EACL")
+        assert paper["publication_status"] == "published"
+
+
+def test_rejected_submission_without_publication_is_marked_rejected():
+    paper = deduplicate_papers([_paperlists_reject_record()])[0]
+    assert paper["publication_status"] == "rejected"
+    assert paper["venue"] == canonical_venue("ICLR")
+
+
+def test_openreview_accept_status_marks_accepted():
+    rec = _paperlists_reject_record()
+    rec["status"] = "Poster"
+    paper = deduplicate_papers([rec])[0]
+    assert paper["publication_status"] == "accepted"

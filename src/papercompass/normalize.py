@@ -357,6 +357,94 @@ def author_quality(value: Any) -> int:
     return score
 
 
+# --- Publication-metadata fusion ------------------------------------------
+# Published-venue indexes own a paper's real venue. Submission trackers
+# (OpenReview / paperlists) report the *submission* target and a review
+# decision, which must not override an authoritative published venue, nor be
+# read as the paper's final publication status when the paper is published
+# elsewhere.
+_PUBLICATION_SOURCE_PRIORITY: dict[str, int] = {
+    "acl_anthology": 1,
+    "crossref": 2,
+    "dblp": 3,
+    "openalex": 4,
+    "pubmed": 4,
+    "europepmc": 4,
+    "semanticscholar": 5,
+    "arxiv": 6,
+    "openreview": 7,
+    "paperlists": 8,
+}
+_DEFAULT_SOURCE_PRIORITY = 5
+_PUBLISHED_VENUE_SOURCES: set[str] = {
+    "acl_anthology", "crossref", "dblp", "openalex", "pubmed", "europepmc",
+}
+_PREPRINT_VENUE_TOKENS: set[str] = {"arxiv", "corr", "openreview", "preprint", "biorxiv", "medrxiv"}
+_ACCEPT_STATUS_TOKENS: tuple[str, ...] = ("poster", "oral", "spotlight", "long", "short", "findings", "accept")
+_WITHDRAW_TOKENS: tuple[str, ...] = ("withdraw",)
+_REJECT_TOKENS: tuple[str, ...] = ("reject",)
+
+
+def _source_priority(name: str | None) -> int:
+    return _PUBLICATION_SOURCE_PRIORITY.get(clean_text(name).lower(), _DEFAULT_SOURCE_PRIORITY)
+
+
+def _finalize_venue(paper: dict[str, Any]) -> str:
+    """Pick the venue from the most authoritative source that reports one.
+
+    Order-independent: real published venues from high-priority sources beat a
+    submission tracker's target venue (e.g. ACL Anthology "EACL" beats a
+    paperlists OpenReview "ICLR" record), and preprint-server venues only win
+    when nothing else reports a venue.
+    """
+    real: list[tuple[int, str]] = []
+    preprint: list[tuple[int, str]] = []
+    for rec in paper.get("source_records") or []:
+        venue_raw = clean_text(rec.get("venue_raw"))
+        if not venue_raw:
+            continue
+        prio = _source_priority(rec.get("source_name"))
+        if venue_raw.lower() in _PREPRINT_VENUE_TOKENS:
+            preprint.append((prio, venue_raw))
+        else:
+            real.append((prio, venue_raw))
+    pool = real or preprint
+    if not pool:
+        return paper.get("venue") or ""
+    pool.sort(key=lambda item: item[0])
+    return canonical_venue(pool[0][1])
+
+
+def _finalize_publication_status(paper: dict[str, Any]) -> str:
+    """Derive a trustworthy publication status from all merged evidence.
+
+    `status` (an OpenReview review decision) is noisy and source-specific; this
+    field is the cross-source verdict. An explicit acceptance, or presence in a
+    published-venue index / a DOI / an ACL id, outranks a submission tracker's
+    "Reject"/"Withdraw" (a paper can be a rejected submission yet published
+    elsewhere).
+    """
+    sources = {clean_text(s).lower() for s in as_list(paper.get("sources"))}
+    ids = paper.get("ids") or {}
+    status = (clean_text(paper.get("status")) or "").lower()
+    published_evidence = bool((sources & _PUBLISHED_VENUE_SOURCES) or ids.get("doi") or ids.get("acl"))
+    if any(tok in status for tok in _ACCEPT_STATUS_TOKENS):
+        return "accepted"
+    if published_evidence:
+        return "published"
+    if any(tok in status for tok in _WITHDRAW_TOKENS):
+        return "withdrawn"
+    if "desk" in status and any(tok in status for tok in _REJECT_TOKENS):
+        return "desk_reject"
+    if any(tok in status for tok in _REJECT_TOKENS):
+        return "rejected"
+    if "arxiv" in sources:
+        return "preprint"
+    if status:
+        return "submitted"
+    return "unknown"
+
+
 def deduplicate_papers(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pool: dict[str, dict[str, Any]] = {}
     index: dict[str, str] = {}
@@ -379,6 +467,8 @@ def deduplicate_papers(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     unique = list(pool.values())
     for paper in unique:
+        paper["venue"] = _finalize_venue(paper)
+        paper["publication_status"] = _finalize_publication_status(paper)
         year = clean_text(paper.get("year")) or "unknown"
         base = paper.get("doi") or paper.get("arxiv_id") or paper.get("acl_id") or paper.get("semantic_scholar_id") or paper.get("title")
         slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", clean_text(paper.get("title")).lower()).strip("-")[:84].strip("-") or "untitled"

@@ -303,6 +303,13 @@ def _paper_matches_venue(paper: dict[str, Any], preferred_venues: list[str]) -> 
     return False
 
 
+# Derived publication_status values (see normalize.deduplicate_papers) used by
+# the acceptance gate. A `venue` label is the *submission* target, not proof of
+# acceptance, so a rejected/withdrawn submission must not pass a venue match.
+_NOT_ACCEPTED_STATUSES = {"rejected", "withdrawn", "desk_reject"}
+_ACCEPTED_STATUSES = {"accepted", "published"}
+
+
 def _is_must_recall_paper(paper: dict[str, Any]) -> bool:
     """Paper came from a user-pinned must_recall seed query."""
     if paper.get("seed_required") is True:
@@ -327,11 +334,23 @@ def paper_matches_publication_scope(paper: dict[str, Any], scope: dict[str, Any]
     excluded = [clean_text(v) for v in as_list(scope.get("excluded_venues") or scope.get("exclude_venues")) if clean_text(v)]
     if excluded and _paper_matches_venue(paper, excluded):
         return False, "excluded_venue"
+
+    # Acceptance policy: accepted_or_preprint (default) keeps accepted/published
+    # papers plus allowed preprints and drops rejected/withdrawn submissions;
+    # accepted_only also requires acceptance evidence behind a venue match;
+    # any restores the legacy venue-only behavior.
+    acceptance = (clean_text(scope.get("acceptance")) or "accepted_or_preprint").lower()
+    status = clean_text(paper.get("publication_status")).lower()
     is_preprint = _paper_is_preprint(paper)
-    if is_preprint and scope.get("include_preprints"):
+
+    if acceptance != "any" and status in _NOT_ACCEPTED_STATUSES:
+        return False, "not_accepted"
+    if is_preprint and scope.get("include_preprints") and acceptance != "accepted_only":
         return True, "preprint_allowed"
     venues = [clean_text(v) for v in as_list(scope.get("preferred_venues")) if clean_text(v)]
     if venues and _paper_matches_venue(paper, venues):
+        if acceptance == "accepted_only" and status not in _ACCEPTED_STATUSES:
+            return False, "not_confirmed_accepted"
         return True, "preferred_venue_match"
     if not venues:
         return True, "no_preferred_venues_configured"

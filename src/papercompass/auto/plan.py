@@ -109,6 +109,22 @@ _GENERIC_QUERY_TOKENS: set[str] = {
     "variants", "related", "key",
 }
 
+# Pure ML / meta phrases that must never become a *standalone* recall anchor.
+# As a bare source-filter substring they flood discovery with off-topic papers
+# (e.g. "scaling laws" pulled 267, "bayesian inference" 123 in the ICL build).
+# They are only useful combined with the topic ("scaling laws of in-context
+# learning"), which survives because only the exact bare phrase is denied.
+_DENY_STANDALONE_RECALL_TERMS: set[str] = {
+    "scaling laws", "scaling law", "bayesian inference", "bayesian",
+    "gradient descent", "attention", "self attention", "transformer",
+    "transformers", "deep learning", "machine learning", "neural network",
+    "neural networks", "language model", "language models",
+    "large language model", "large language models", "representation learning",
+    "optimization", "generalization", "reinforcement learning",
+    "meta learning", "fine tuning", "pretraining", "pre training",
+    "distribution shift", "out of distribution", "in distribution",
+}
+
 _LOW_PRECISION_BROAD_TOKEN_SETS: set[frozenset[str]] = {
     frozenset({"chain", "thought"}),
     frozenset({"test", "time"}),
@@ -286,6 +302,46 @@ def _recall_aliases(term: str) -> list[str]:
 
 def _blob_has_any(blob: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pattern, blob) for pattern in patterns)
+
+
+# Markers that introduce an exclusion clause inside a free-text direction.
+# Words appearing only after one of these must not drive axis detection: a
+# direction whose out-of-scope clause mentions "agent" is not an agent topic.
+_OUT_OF_SCOPE_MARKERS: tuple[str, ...] = (
+    "out-of-scope",
+    "out of scope",
+    "out of-scope",
+    "out-of scope",
+    "not in scope",
+    "not in-scope",
+    "excluding",
+    "excludes",
+    "exclude:",
+    "排除",
+    "不包括",
+    "不收录",
+    "不纳入",
+)
+
+
+def _in_scope_text(direction: str) -> str:
+    """Return only the in-scope portion of a direction.
+
+    Axis detection for cross-axis bridge terms scans free text, so an exclusion
+    clause like "...out-of-scope: ... agent online adaptation" would otherwise
+    make a pure in-context-learning topic look like an agent topic and inject
+    unrelated multi-agent bridge queries. Truncating at the earliest exclusion
+    marker keeps only the positive scope.
+    """
+    if not direction:
+        return direction
+    low = direction.lower()
+    cut = len(direction)
+    for marker in _OUT_OF_SCOPE_MARKERS:
+        idx = low.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    return direction[:cut]
 
 
 def _coverage_axis_aliases(*texts: str) -> list[str]:
@@ -479,7 +535,7 @@ def recall_terms_for_plan(
     base_hints = [_clean_phrase(h) for h in search_hints if _clean_phrase(h)]
     protected_terms.extend(base_hints)
     coverage_aliases = _coverage_axis_aliases(
-        direction,
+        _in_scope_text(direction),
         " ".join(search_hints),
         search_keyword_text,
         " ".join(discriminator_terms or []),
@@ -494,6 +550,9 @@ def recall_terms_for_plan(
     cleaned = _dedupe_keep_order([_clean_phrase(t) for t in terms if _clean_phrase(t)])
     protected = _dedupe_keep_order([_clean_phrase(t) for t in protected_terms if _clean_phrase(t)])
     ordered = _dedupe_keep_order(protected + cleaned)
+    # Drop bare generic/meta phrases that would over-recall as standalone source
+    # filters; topic-specific compounds containing them are unaffected.
+    ordered = [t for t in ordered if t.lower() not in _DENY_STANDALONE_RECALL_TERMS]
     return ordered[:cap]
 
 
@@ -713,7 +772,7 @@ def render_plan(
     arxiv_query_cap = 12
     base_priority_terms = [_clean_phrase(h) for h in search_hints if _clean_phrase(h)]
     coverage_priority_terms = _coverage_axis_aliases(
-        direction,
+        _in_scope_text(direction),
         " ".join(search_hints),
         search_keyword_text,
         " ".join(discriminator_terms),

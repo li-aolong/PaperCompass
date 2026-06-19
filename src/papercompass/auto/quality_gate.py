@@ -110,9 +110,12 @@ def diagnose_review_queue(
             "uncovered": uncovered,
         })
     if pending_count > capacity_for_rule:
+        # A large queue is a *budget* problem (raise --weak-max-batches), not a
+        # broken-topic problem. The genuine "rules are broken" signal is
+        # generic_anchor_dominates below; only that forces rule_repair.
         reasons.append({
             "code": "weak_queue_too_large",
-            "severity": "rule_repair",
+            "severity": "budget",
             "pending_count": pending_count,
             "rule_repair_threshold": capacity_for_rule,
         })
@@ -142,6 +145,7 @@ def diagnose_review_queue(
         "max_batches": max_batches,
         "needed_batches": needed_batches,
         "effective_batches": effective_batches,
+        "recommended_max_batches": needed_batches,
         "review_capacity": capacity,
         "uncovered_count": uncovered,
         "reasons": reasons,
@@ -204,7 +208,8 @@ def _write_review_queue_markdown(path: Path, diagnosis: dict[str, Any]) -> None:
         f"- 需要 batch：{diagnosis.get('needed_batches')}",
         f"- 实际容量：{diagnosis.get('review_capacity')}",
         f"- 未覆盖候选：{diagnosis.get('uncovered_count')}",
-        f"- 泛锚点-only 数量：{diagnosis.get('generic_only_count')} "
+        f"- 建议复核批次:重跑加 `--weak-max-batches {diagnosis.get('recommended_max_batches')}`(或更高)",
+        f"- 泛锚点-only 数量:{diagnosis.get('generic_only_count')} "
         f"({diagnosis.get('generic_only_ratio')})",
         "",
         "## 阻断原因",
