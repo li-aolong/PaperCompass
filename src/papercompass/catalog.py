@@ -9,7 +9,18 @@ from pathlib import Path
 from typing import Any
 
 from .config import catalog_dir, data_dir, workspace_relative_path
-from .text import as_list, clean_text, format_author_list, normalize_title, read_json, title_tokens, write_json
+from .text import (
+    _fsync_dir,
+    as_list,
+    atomic_write_text,
+    clean_text,
+    format_author_list,
+    normalize_title,
+    read_json,
+    title_tokens,
+    workspace_lock,
+    write_json,
+)
 
 
 def rel(workspace: Path, path: Path) -> str:
@@ -151,15 +162,20 @@ def sort_pointer(item: dict[str, Any]) -> tuple[int, str]:
 
 
 def build_catalog(workspace: Path, source: Path | None = None) -> dict[str, Any]:
+    with workspace_lock(workspace):
+        return _build_catalog_unlocked(workspace, source)
+
+
+def _build_catalog_unlocked(workspace: Path, source: Path | None = None) -> dict[str, Any]:
     source = source or data_dir(workspace) / "papers.json"
     items = read_json(source, [])
     if not isinstance(items, list):
         raise ValueError(f"catalog source is not a list: {source}")
 
     catalog = catalog_dir(workspace)
-    tmp_dir = workspace / ".catalog.tmp"
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
+    build_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    tmp_dir = workspace / f".catalog.tmp.{build_id}"
+    backup_dir = workspace / f".catalog.prev.{build_id}"
     tmp_papers = tmp_dir / "papers"
     tmp_index = tmp_dir / "index"
     tmp_papers.mkdir(parents=True)
@@ -191,7 +207,7 @@ def build_catalog(workspace: Path, source: Path | None = None) -> dict[str, Any]
         per_paper["retrieval"] = record
         per_paper["aliases"] = aliases
 
-        md_path.write_text(paper_markdown(item, record, aliases), encoding="utf-8")
+        atomic_write_text(md_path, paper_markdown(item, record, aliases))
         write_json(json_path, per_paper)
         records.append(record)
         p = pointer(record)
@@ -226,7 +242,10 @@ def build_catalog(workspace: Path, source: Path | None = None) -> dict[str, Any]
     write_json(tmp_index / "by_venue.json", by_venue)
     write_json(tmp_index / "title_word_index.json", title_word_index)
     write_json(tmp_index / "top_cited.json", sorted(records, key=lambda r: int(r.get("max_citation") or 0), reverse=True)[:100])
-    (tmp_index / "quick_titles.md").write_text("# 论文快速题名索引\n\n" + "\n".join(sorted(title_lines, key=str.lower)) + "\n", encoding="utf-8")
+    atomic_write_text(
+        tmp_index / "quick_titles.md",
+        "# 论文快速题名索引\n\n" + "\n".join(sorted(title_lines, key=str.lower)) + "\n",
+    )
 
     existing_fulltext = catalog / "fulltext"
     if existing_fulltext.exists():
@@ -259,9 +278,26 @@ def build_catalog(workspace: Path, source: Path | None = None) -> dict[str, Any]
     write_json(tmp_dir / "manifest.json", manifest)
     write_catalog_docs(tmp_dir, len(records), workspace_relative_path(workspace, source))
 
+    old_catalog_moved = False
     if catalog.exists():
-        shutil.rmtree(catalog)
-    tmp_dir.rename(catalog)
+        catalog.rename(backup_dir)
+        _fsync_dir(workspace)
+        old_catalog_moved = True
+    try:
+        tmp_dir.rename(catalog)
+        _fsync_dir(workspace)
+    except Exception:
+        if old_catalog_moved and backup_dir.exists() and not catalog.exists():
+            backup_dir.rename(catalog)
+            _fsync_dir(workspace)
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+            _fsync_dir(workspace)
+        raise
+    else:
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+            _fsync_dir(workspace)
     return {"catalog": "catalog", "paper_count": len(records), "manifest": "catalog/manifest.json"}
 
 
@@ -309,8 +345,8 @@ def write_catalog_docs(tmp_dir: Path, paper_count: int, source: str) -> None:
 
 拿到 `markdown_path` 或 `json_path` 后，只打开对应单篇文件。需要全文时先查 `fulltext/index.json`。
 """
-    (tmp_dir / "README.md").write_text(readme, encoding="utf-8")
-    (tmp_dir / "LLM_RETRIEVAL_GUIDE.md").write_text(guide, encoding="utf-8")
+    atomic_write_text(tmp_dir / "README.md", readme)
+    atomic_write_text(tmp_dir / "LLM_RETRIEVAL_GUIDE.md", guide)
 
 
 def resolve_pointer(workspace: Path, query: str) -> dict[str, Any]:

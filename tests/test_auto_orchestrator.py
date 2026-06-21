@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from papercompass.cli import main
 from papercompass.auto.state import AutoState
 from papercompass.plugins import BrainPlugin, BrainResponse
 
@@ -56,6 +57,153 @@ def test_state_checkpoint_round_trip(tmp_path: Path):
     assert s2.stage_status("plan_direction") == "completed"
     assert s2.stage_done("plan_direction") is True
     assert s2.data["stages"]["plan_direction"]["topic_id"] == "x"
+
+
+def test_run_auto_build_requires_user_confirmation_for_formal_run(tmp_path: Path):
+    from papercompass.auto.orchestrator import ConfirmationRequired, run_auto_build
+
+    ws = tmp_path / "ws"
+    with pytest.raises(ConfirmationRequired, match="confirmed-token"):
+        run_auto_build(ws, "alpha beta methods", min_year=2024)
+    assert not ws.exists()
+
+
+def test_cli_auto_build_prepare_writes_confirmation_without_brain(tmp_path: Path, capsys):
+    ws = tmp_path / "alpha--2024plus"
+
+    main([
+        "auto-build",
+        "--workspace",
+        str(ws),
+        "--direction",
+        "alpha beta methods",
+        "--min-year",
+        "2024",
+        "--brain",
+        "missing-brain-name",
+        "--prepare",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "confirmation_required"
+    assert payload["confirmation_token"].startswith("pcfm_")
+    assert payload["inputs"]["direction"] == "alpha beta methods"
+    assert payload["inputs"]["fresh"] is False
+    assert payload["inputs"]["brain"] == "missing-brain-name"
+    assert (ws / ".papercompass" / "confirmations" / f"{payload['confirmation_token']}.json").exists()
+
+
+def test_auto_build_token_rejects_changed_fresh_flag(tmp_path: Path):
+    from papercompass.auto.orchestrator import ConfirmationRequired, run_auto_build
+    from papercompass.confirmation import auto_build_confirmation_inputs, prepare_confirmation
+
+    ws = tmp_path / "alpha--2024plus"
+    inputs = auto_build_confirmation_inputs(
+        workspace=ws,
+        direction="alpha beta methods",
+        min_year=2024,
+        sources=["arxiv"],
+        brain="stub",
+        second_brain=None,
+        max_remote_calls=5,
+        refresh=False,
+        fresh=False,
+        weak_batch_size=25,
+        weak_max_batches=1,
+        boundary_max_batches=None,
+        topic_id="alpha",
+        allow_no_embedding=False,
+        seed_cap=None,
+        original_query=None,
+        prior_markdown=None,
+    )
+    token = prepare_confirmation(ws, command="auto-build", inputs=inputs)["token"]
+
+    with pytest.raises(ConfirmationRequired, match="参数|不一致"):
+        run_auto_build(
+            ws,
+            "alpha beta methods",
+            brain="stub",
+            min_year=2024,
+            sources=["arxiv"],
+            max_remote_calls=5,
+            weak_max_batches=1,
+            fresh=True,
+            topic_id_override="alpha",
+            confirmed_token=token,
+        )
+
+
+def test_run_auto_build_plan_only_does_not_require_user_confirmation(tmp_path: Path, monkeypatch):
+    from papercompass.auto.orchestrator import run_auto_build
+
+    monkeypatch.setenv("PAPERCOMPASS_SKIP_SEED_SEARCH", "1")
+    monkeypatch.setenv("PAPERCOMPASS_SKIP_SEED_VERIFY", "1")
+    ws = tmp_path / "ws"
+    result = run_auto_build(
+        ws,
+        "alpha + beta methods",
+        min_year=2024,
+        brain=StubBrain(
+            {
+                "topic_id": "stub-topic",
+                "name": "Stub topic",
+                "description": "for tests",
+                "min_year": 2024,
+                "search_hints": [
+                    "alpha decoding",
+                    "beta sampling",
+                    "gamma extension",
+                    "stub research method",
+                    "alpha-beta acceleration",
+                    "draft and verify alpha",
+                ],
+                "search_keyword_text": (
+                    "Alpha decoding, beta sampling, gamma extension, stub research "
+                    "method, alpha-beta acceleration, draft and verify alpha."
+                ),
+                "judge_examples": {
+                    "in_scope": [
+                        {"title": "Alpha decoding paper", "reason": "core"},
+                        {"title": "Beta sampling overview", "reason": "core"},
+                        {"title": "Gamma extension", "reason": "core"},
+                    ],
+                    "out_of_scope": [
+                        {"title": "Off-topic 1", "reason": "wrong field"},
+                        {"title": "Off-topic 2", "reason": "different topic"},
+                        {"title": "Off-topic 3", "reason": "unrelated"},
+                    ],
+                },
+                "seed_papers": [
+                    {
+                        "title": "An alpha decoding paper",
+                        "year": 2024,
+                        "why_seed": "core",
+                        "paper_role": "core_method",
+                        "required": True,
+                    },
+                    {
+                        "title": "Beta sampling overview",
+                        "year": 2024,
+                        "why_seed": "core",
+                        "paper_role": "core_method",
+                        "required": True,
+                    },
+                    {
+                        "title": "Stub anchor paper",
+                        "year": 2024,
+                        "why_seed": "anchor",
+                        "paper_role": "background_anchor",
+                        "required": True,
+                    },
+                ],
+            }
+        ),
+        plan_only=True,
+    )
+
+    assert result.final_status == "plan_only"
+    assert (ws / "topic.yaml").exists()
 
 
 def test_stage_plan_direction_writes_yaml(tmp_path: Path, monkeypatch):
@@ -178,6 +326,38 @@ def test_stage_plan_direction_can_pin_topic_id_to_workspace_contract(tmp_path: P
 
     assert result["topic_id"] == "implicit-chain-of-thought"
     assert load_topic_config(ws)["topic_id"] == "implicit-chain-of-thought"
+
+
+def test_stage_discover_keeps_build_but_skips_intermediate_catalog(tmp_path: Path, monkeypatch):
+    import papercompass.auto.stages as stages
+    from papercompass.auto.stages import stage_discover
+
+    ws = tmp_path / "ws"
+    (ws / ".papercompass").mkdir(parents=True)
+    captured: dict[str, object] = {}
+
+    def fake_run_discovery(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "source_results": [{"seen": 3, "kept": 2, "errors": []}],
+            "remote_calls_used": 1,
+            "remote_calls_limit": kwargs.get("max_remote_calls"),
+            "paper_count": 2,
+        }
+
+    monkeypatch.setattr(stages, "run_discovery", fake_run_discovery)
+    result = stage_discover(
+        ws,
+        min_year=2024,
+        max_remote_calls=5,
+        sources=["openalex"],
+        refresh=False,
+        state=AutoState(ws),
+    )
+
+    assert result["status"] == "completed"
+    assert captured["build"] is True
+    assert captured["catalog"] is False
 
 
 def test_seed_repair_adds_source_backed_direct_id_seed_without_brain_call(tmp_path: Path):

@@ -6,6 +6,8 @@ from typing import Any
 
 import yaml
 
+from .text import atomic_write_text
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR_NAME = ".papercompass"
@@ -28,8 +30,7 @@ def load_yaml(path: Path, default: Any = None) -> Any:
 
 
 def write_yaml(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    atomic_write_text(path, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
 
 
 def state_dir(workspace: Path) -> Path:

@@ -18,9 +18,142 @@ from ..config import (
     workspace_relative_path,
 )
 from ..text import clean_text, parse_year, write_jsonl
+from .registry import DiscoveryContext, SourceCapabilities, SourcePreflight, SourceQuery
 
 
 USER_AGENT = "papercompass/0.1"
+
+
+class ArxivSourcePlugin:
+    name = "arxiv"
+    description = "arXiv preprint metadata"
+    capabilities = SourceCapabilities(
+        name="arxiv",
+        requires_auth=False,
+        supports_incremental=True,
+        supports_cursor=False,
+        supports_since=True,
+        default_rate_limit_seconds=3.2,
+    )
+
+    def preflight(self, context: DiscoveryContext) -> SourcePreflight:
+        sleep_seconds = float(context.source_config.get("sleep_seconds", self.capabilities.default_rate_limit_seconds))
+        return SourcePreflight(
+            source=self.name,
+            status="ok",
+            auth_state="not_required",
+            effective_rate_limit_seconds=sleep_seconds,
+        )
+
+    def plan_queries(self, context: DiscoveryContext) -> list[SourceQuery]:
+        from ..discovery import (
+            _config_bool,
+            _positive_int,
+            arxiv_year_query,
+            cache_manifest_key,
+            default_arxiv_queries,
+        )
+        from ..source_budget import ensure_arxiv_budget_floor
+
+        cfg = dict(context.source_config)
+        queries = cfg.get("queries") or default_arxiv_queries(context.topic)
+        queries = [clean_text(query) for query in queries if clean_text(query)]
+        if clean_text(cfg.get("budget_policy") or "auto_floor").lower() != "fixed":
+            cfg["queries"] = queries
+            ensure_arxiv_budget_floor(cfg)
+        max_results = int(cfg.get("max_results", 100))
+        page_size = max(1, int(cfg.get("page_size", 100)))
+        sort_by = clean_text(cfg.get("sort_by", "relevance")) or "relevance"
+        recent_first = _config_bool(cfg.get("recent_first", True), True)
+        active_years = sorted(context.years, reverse=True) if recent_first else list(context.years)
+        recent_year_count = _positive_int(cfg.get("recent_year_count"))
+        if recent_year_count:
+            active_years = active_years[:recent_year_count]
+
+        planned: list[SourceQuery] = []
+        for query in queries:
+            for year in active_years:
+                year_query = arxiv_year_query(query, year)
+                for offset in range(0, max_results, page_size):
+                    limit = min(page_size, max_results - offset)
+                    planned.append(SourceQuery(
+                        source=self.name,
+                        query_key=cache_manifest_key("arxiv", year_query, sort_by, offset),
+                        query=year_query,
+                        since=f"{year}-01-01",
+                        params={
+                            "base_query": query,
+                            "year": year,
+                            "offset": offset,
+                            "limit": limit,
+                            "sort_by": sort_by,
+                            "timeout": int(cfg.get("timeout", context.timeout)),
+                            "retry_attempts": int(cfg.get("retry_attempts", 1)),
+                            "sleep_seconds": float(cfg.get("sleep_seconds", 3.2)),
+                        },
+                    ))
+        return planned
+
+    def fetch(self, query: SourceQuery, context: DiscoveryContext) -> list[dict[str, Any]]:
+        from ..discovery import arxiv_search
+
+        payload = arxiv_search(
+            query.query,
+            start=int(query.params.get("offset", 0)),
+            max_results=int(query.params.get("limit", 100)),
+            sort_by=clean_text(query.params.get("sort_by", "relevance")) or "relevance",
+            timeout=int(query.params.get("timeout", context.timeout)),
+            retry_attempts=int(query.params.get("retry_attempts", 1)),
+            budget=context.budget,
+        )
+        data = payload.get("data") if isinstance(payload, dict) else []
+        return [item for item in data if isinstance(item, dict)]
+
+    def normalize(self, item: dict[str, Any], query: SourceQuery, context: DiscoveryContext) -> dict[str, Any]:
+        raw = dict(item)
+        raw["title"] = clean_text(raw.get("title"))
+        raw["abstract"] = clean_text(raw.get("abstract"))
+        raw["venue"] = clean_text(raw.get("venue")) or "arXiv"
+        raw["arxiv_id"] = clean_text(raw.get("arxiv_id"))
+        if raw.get("published") and not raw.get("year"):
+            raw["year"] = parse_year(raw.get("published"))
+        if raw.get("arxiv_id") and not raw.get("url"):
+            raw["url"] = f"https://arxiv.org/abs/{raw['arxiv_id']}"
+        if raw.get("arxiv_id") and not raw.get("pdf_url"):
+            raw["pdf_url"] = f"https://arxiv.org/pdf/{raw['arxiv_id']}.pdf"
+        return {key: value for key, value in raw.items() if value not in (None, "", [], {})}
+
+    def run(self, context: DiscoveryContext) -> dict[str, Any]:
+        from ..discovery import (
+            _config_bool,
+            _positive_int,
+            default_arxiv_queries,
+            sync_arxiv_discovery,
+        )
+        from ..source_budget import ensure_arxiv_budget_floor
+
+        cfg = dict(context.source_config)
+        queries = cfg.get("queries") or default_arxiv_queries(context.topic)
+        if clean_text(cfg.get("budget_policy") or "auto_floor").lower() != "fixed":
+            cfg["queries"] = queries
+            ensure_arxiv_budget_floor(cfg)
+        return sync_arxiv_discovery(
+            context.workspace,
+            context.topic,
+            context.years,
+            queries=[clean_text(q) for q in queries if clean_text(q)],
+            max_results=int(cfg.get("max_results", 100)),
+            page_size=int(cfg.get("page_size", 100)),
+            sort_by=clean_text(cfg.get("sort_by", "relevance")) or "relevance",
+            refresh=context.refresh,
+            timeout=int(cfg.get("timeout", context.timeout)),
+            sleep_seconds=float(cfg.get("sleep_seconds", 3.2)),
+            rate_limit_error_limit=int(cfg.get("rate_limit_error_limit", 3)),
+            retry_attempts=int(cfg.get("retry_attempts", 1)),
+            recent_year_count=_positive_int(cfg.get("recent_year_count")),
+            budget=context.budget,
+            recent_first=_config_bool(cfg.get("recent_first", True), True),
+        )
 
 
 def arxiv_search(query: str, max_results: int = 25, sort_by: str = "relevance", timeout: int = 35) -> list[dict[str, Any]]:

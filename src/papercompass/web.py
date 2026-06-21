@@ -149,6 +149,31 @@ def source_label(source: str) -> str:
     return labels.get(source, source.replace("_", " ").strip().title())
 
 
+ROLE_LABELS = {
+    "core_method": "Core",
+    "mechanism_eval": "Eval",
+    "background_anchor": "Anchor",
+    "boundary_negative": "Negative",
+    "out_of_scope": "Out",
+}
+
+
+def paper_role_value(paper: dict[str, Any]) -> str:
+    review = paper.get("review_decision") if isinstance(paper.get("review_decision"), dict) else {}
+    return clean_text(paper.get("paper_role") or review.get("paper_role"))
+
+
+def paper_role_label(role: str) -> str:
+    role = clean_text(role)
+    return ROLE_LABELS.get(role, role.replace("_", " ").strip().title() if role else "")
+
+
+def paper_decision_label(paper: dict[str, Any]) -> str:
+    review = paper.get("review_decision") if isinstance(paper.get("review_decision"), dict) else {}
+    decision = paper.get("decision") if isinstance(paper.get("decision"), dict) else {}
+    return clean_text(review.get("decision") or decision.get("reason") or decision.get("confidence"))
+
+
 def load_papers(workspace: Path) -> list[dict[str, Any]]:
     papers = read_json(data_dir(workspace) / "papers.json", [])
     return papers if isinstance(papers, list) else []
@@ -218,6 +243,7 @@ def paper_to_result(paper: dict[str, Any], compact: dict[str, Any] | None = None
     urls = paper.get("urls") or {}
     landing_url, landing_label = preferred_landing(paper)
     raw_venue = paper.get("venue") or (compact or {}).get("venue", "")
+    role = paper_role_value(paper)
     result = {
         "paper_key": paper.get("paper_key") or (compact or {}).get("paper_key"),
         "title": paper.get("title") or (compact or {}).get("title", ""),
@@ -233,6 +259,9 @@ def paper_to_result(paper: dict[str, Any], compact: dict[str, Any] | None = None
         "tags_raw": paper.get("tags") or (compact or {}).get("tags", []),
         "sources": [source_label(s) for s in paper.get("sources", [])],
         "max_citation": paper.get("max_citation", (compact or {}).get("max_citation", 0)),
+        "paper_role": role,
+        "role_label": paper_role_label(role),
+        "decision_label": paper_decision_label(paper),
         "ids": {
             "doi": ids.get("doi") or paper.get("doi", ""),
             "arxiv": ids.get("arxiv") or paper.get("arxiv_id", ""),
@@ -402,6 +431,7 @@ def make_filters(workspace: Path) -> dict[str, Any]:
     by_keyword: dict[str, int] = {}
     by_tag: dict[str, int] = {}
     by_venue: dict[str, int] = {}
+    by_role: dict[str, int] = {}
     for paper in papers:
         seen_keywords = {canonical_keyword(k) for k in paper.get("keyword_hits", []) if clean_text(k)}
         for keyword in seen_keywords:
@@ -410,6 +440,9 @@ def make_filters(workspace: Path) -> dict[str, Any]:
             by_tag[tag] = by_tag.get(tag, 0) + 1
         venue = venue_label(paper.get("venue", ""))
         by_venue[venue] = by_venue.get(venue, 0) + 1
+        role = paper_role_value(paper)
+        if role:
+            by_role[role] = by_role.get(role, 0) + 1
     tag_filters = dict(by_keyword)
     for key, value in by_tag.items():
         tag_filters[key] = tag_filters.get(key, 0) + value
@@ -423,6 +456,13 @@ def make_filters(workspace: Path) -> dict[str, Any]:
         "venues": [
             {"value": key, "count": value}
             for key, value in sorted(by_venue.items(), key=lambda item: item[1], reverse=True)
+        ],
+        "roles": [
+            {"value": key, "label": paper_role_label(key), "count": value}
+            for key, value in sorted(
+                by_role.items(),
+                key=lambda item: (ROLE_LABELS.get(item[0], item[0]), item[0]),
+            )
         ],
     }
 
@@ -510,6 +550,7 @@ def search_papers(workspace: Path, params: dict[str, list[str]]) -> dict[str, An
     year = clean_text(params.get("year", [""])[0])
     keyword = clean_text(params.get("keyword", [""])[0])
     venue = clean_text(params.get("venue", [""])[0])
+    role = clean_text(params.get("role", [""])[0])
     sort = clean_text(params.get("sort", ["relevance"])[0]) or "relevance"
     limit = max(1, min(int(params.get("limit", ["50"])[0] or 50), 200))
     offset = max(0, int(params.get("offset", ["0"])[0] or 0))
@@ -525,6 +566,8 @@ def search_papers(workspace: Path, params: dict[str, list[str]]) -> dict[str, An
         ):
             continue
         if venue and venue_label(paper.get("venue", "")) != venue:
+            continue
+        if role and paper_role_value(paper) != role:
             continue
         score = score_paper(paper, query)
         if query and score <= 0:

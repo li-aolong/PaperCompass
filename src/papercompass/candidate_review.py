@@ -14,7 +14,7 @@ from .config import (
 )
 from .normalize import identity_keys, rank_score
 from .roles import CORE_METHOD, normalize_role
-from .text import as_list, clean_text, iter_jsonl, normalize_title, read_json, write_json
+from .text import append_jsonl_locked, as_list, atomic_write_text, clean_text, iter_jsonl, normalize_title, read_json, workspace_lock, write_json
 
 
 def stamp() -> str:
@@ -204,8 +204,7 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
     ]
     lines.extend(render_candidate_list("待复核弱候选", payload["review_candidates"], required=True))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 def build_weak_candidate_review(workspace: Path) -> dict[str, Any]:
@@ -269,6 +268,21 @@ def normalize_decision_row(row: dict[str, Any], review_run: str = "") -> dict[st
     decision = clean_text(row.get("decision")).lower()
     if decision not in {"accept", "reject", "defer", "anchor"}:
         raise ValueError(f"非法 decision：{row.get('decision')}")
+    inclusion_evidence = [
+        clean_text(item)
+        for item in as_list(row.get("inclusion_evidence"))
+        if clean_text(item)
+    ][:3]
+    exclusion_evidence = [
+        clean_text(item)
+        for item in as_list(row.get("exclusion_evidence"))
+        if clean_text(item)
+    ][:3]
+    missing_information = [
+        clean_text(item)
+        for item in as_list(row.get("missing_information"))
+        if clean_text(item)
+    ][:3]
     normalized = {
         "candidate_key": clean_text(row.get("candidate_key")) or candidate_key(row),
         "paper_key": clean_text(row.get("paper_key")),
@@ -277,6 +291,10 @@ def normalize_decision_row(row: dict[str, Any], review_run: str = "") -> dict[st
         "decision": decision,
         "reason": clean_text(row.get("reason")),
         "action": clean_text(row.get("action")),
+        "confidence": clean_text(row.get("confidence")).lower(),
+        "inclusion_evidence": inclusion_evidence,
+        "exclusion_evidence": exclusion_evidence,
+        "missing_information": missing_information,
         "review_run": clean_text(row.get("review_run")) or review_run,
         "created_at": clean_text(row.get("created_at")) or now_iso(),
         "ids": row.get("ids") if isinstance(row.get("ids"), dict) else {},
@@ -347,6 +365,11 @@ def validate_review_decisions(queue_path: Path, decisions_path: Path) -> dict[st
 
 
 def apply_review_decisions(workspace: Path, decisions_path: Path, queue_path: Path | None = None) -> dict[str, Any]:
+    with workspace_lock(workspace):
+        return _apply_review_decisions_unlocked(workspace, decisions_path, queue_path)
+
+
+def _apply_review_decisions_unlocked(workspace: Path, decisions_path: Path, queue_path: Path | None = None) -> dict[str, Any]:
     validation = validate_review_decisions(queue_path, decisions_path) if queue_path else {}
     if validation and not validation.get("valid"):
         raise ValueError("decision 文件未通过校验，不能 apply")
@@ -364,10 +387,7 @@ def apply_review_decisions(workspace: Path, decisions_path: Path, queue_path: Pa
         normalized.setdefault("scoring_policy", "papercompass.review_policy.v1")
         rows.append(normalized)
     out_path = applied_decisions_path(workspace)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    append_jsonl_locked(out_path, rows)
     manifest = {
         "applied_at": now_iso(),
         "workspace": workspace_label(workspace),

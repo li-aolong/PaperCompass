@@ -59,7 +59,7 @@ git pull && uv sync --extra embed
 uv tool install --editable . --extra embed
 
 # 2. 安装后，你可以在系统的任意目录下直接全局调用：
-papercompass auto-build --direction "..."
+papercompass --help
 
 # 3. 当项目更新时，只需在 PaperCompass 项目根目录下执行：
 git pull && uv sync --extra embed
@@ -68,26 +68,26 @@ git pull && uv sync --extra embed
 
 ### 2. 配置说明 (重要：OpenAlex / Brain 访问配置)
 
-本项目在文献检索阶段高度依赖 [OpenAlex](https://openalex.org) 服务。自 2026 年 2 月起，OpenAlex 接口已全面要求所有请求携带 **API Key**（旧的纯邮箱 Polite Pool 机制已不再有效）。
+本项目在文献检索阶段会使用 [OpenAlex](https://openalex.org) 服务。匿名或未认证访问在集中建库时更容易遇到 403/429、限速或配额问题，建议配置 API Key；如果暂时没有 Key，至少配置 `OPENALEX_EMAIL` 以便按 OpenAlex 的礼貌访问机制发起请求。
 
-*   **API Key 免费额度与费用**：
-    *   **每日免费 allowance**：每个注册并生成的免费 API Key 每天自带 **$1.00 的免费额度**（普通查询每 1,000 次约扣除 $0.1 ~ $1.0，日常单课题建库完全够用且免受限流）。
-*   **如何获取免费 API Key**：
-    1. 访问 [openalex.org](https://openalex.org) 注册/登录账号。
-    2. 进入 [API 设置页面 (openalex.org/settings/api)](https://openalex.org/settings/api) 免费生成 API Key。
-*   **如何配置 API Key**：
-    *   **方法一（推荐，全局环境变量）**：在系统 shell 中配置：
+*   **推荐配置方式**：
+    *   **方法一（推荐，全局环境变量）**：在系统 shell 中配置 API Key：
         ```bash
         export OPENALEX_API_KEY="your_api_key_here"
         ```
-    *   **方法二（Workspace 局部配置）**：填入 Workspace 目录下的 `sources.yaml` 中：
+        或至少配置联系邮箱：
+        ```bash
+        export OPENALEX_EMAIL="you@example.com"
+        ```
+    *   **方法二（Workspace 局部配置）**：填入 Workspace 目录下的 `sources.yaml`：
         ```yaml
         discovery:
           openalex:
             api_key: "your_api_key_here"
+            mailto: "you@example.com"
         ```
 
-*(注意：若需要使用大模型进行评分和复核，还需要根据 [AGENT_ENTRY.md](AGENT_ENTRY.md) 配置对应的 LLM 环境变量，如 `OPENAI_API_KEY`、`GEMINI_API_KEY` 等)*
+*(注意：若需要使用大模型进行评分和复核，还需要根据 [AGENT_ENTRY.md](AGENT_ENTRY.md) 配置对应的 LLM 环境变量。通用 Chat Completions 接口使用 `PAPERCOMPASS_BRAIN_BASE_URL`、`PAPERCOMPASS_BRAIN_API_KEY`、`PAPERCOMPASS_BRAIN_MODEL`，可选 `PAPERCOMPASS_BRAIN_RESPONSE_FORMAT` / `PAPERCOMPASS_BRAIN_MAX_TOKENS` / `PAPERCOMPASS_BRAIN_MODEL_REVISION` / `PAPERCOMPASS_BRAIN_INPUT_PRICE_PER_MTOK` / `PAPERCOMPASS_BRAIN_OUTPUT_PRICE_PER_MTOK`，然后传 `--brain openai_compatible`。)*
 
 ### 3. 使用方法 (通过 AI Agent)
 
@@ -101,21 +101,73 @@ git pull && uv sync --extra embed
 >
 > 请先给我确认信息，不要直接开始。"
 
-Agent 在确认需求后，会通过以下命令启动流程：
+Agent 在确认需求后，先生成确认 token。`--prepare` 不调用 brain、不联网，也不写 `.raw/data/catalog`：
 
 ```bash
 # 如果使用方式 A（本地运行）：
 uv run --no-sync papercompass auto-build \
   --direction "LLM 推理中的 speculative decoding" \
   --min-year 2022 \
+  --prepare \
   -v
 
 # 如果使用方式 B（全局快捷调用）：
 papercompass auto-build \
   --direction "LLM 推理中的 speculative decoding" \
   --min-year 2022 \
+  --prepare \
   -v
 ```
+
+用户确认 `confirmation_token` 对应的 direction、年份、source、brain 和预算后，再正式运行：
+
+```bash
+uv run --no-sync papercompass auto-build \
+  --direction "LLM 推理中的 speculative decoding" \
+  --min-year 2022 \
+  --confirmed-token pcfm_xxx \
+  -v
+```
+
+如果 Agent 能拿到用户原始请求原话，可额外传 `--original-query "<verbatim user prompt>"`，PaperCompass 会把它写入 `topic.yaml.original_query` 供后续溯源。
+
+已有 Workspace 需要刷新 source、重建 catalog 和重新 QA 时，也使用两阶段确认：
+
+```bash
+uv run --no-sync papercompass update \
+  --workspace <workspace> \
+  --min-year 2022 \
+  --prepare
+
+uv run --no-sync papercompass update \
+  --workspace <workspace> \
+  --min-year 2022 \
+  --confirmed-token pcfm_xxx
+```
+
+`update` 默认运行 staged checkpointed full rebuild with identity delta：先复制必要输入到 `.papercompass/updates/update_<id>/staged_workspace/`，在 staged workspace 内完成 discover、build、catalog 和 QA；QA 未失败后才把 staged `.raw/data/catalog` 发布回主 workspace，提交 `.papercompass/checkpoints/`，并清理成功运行的 `backup_before/` 与 staged workspace。QA failed 时不发布 staged 产物，主 workspace 的 `.raw/data/catalog` 保持运行前状态；`commit.json` 会明确 `rollback_scope` 与保留的审计产物。`data/` 和 `catalog/` 仍保守全量重建，不做局部 catalog 更新。
+
+低层写入命令同样有代码级确认门。`discover`、`build`、`catalog build`、`import-*`、`add-paper`、`override add`、`sync`、`fulltext fetch` 等会修改 workspace 或联网写入的命令，正式执行前也必须先用同一命令加 `--prepare` 生成 token，再用 `--confirmed-token` 执行。
+
+独立前筛可用 `papercompass prefilter --workspace <workspace> --prepare` -> `--confirmed-token`。它只对 `data/pending_review_candidates.json` 运行 deterministic prefilter，写 `data/prefilter_decisions.jsonl`；完整评分仍在 `auto-build` 的 `score_papers` 阶段执行。
+
+运维检查入口：
+
+```bash
+uv run --no-sync papercompass doctor workspace --workspace <workspace>
+uv run --no-sync papercompass doctor workspace --workspace <workspace> --fix
+uv run --no-sync papercompass doctor workspace --workspace <workspace> --fix --prune-updates
+uv run --no-sync papercompass monitor summary --workspace <workspace>
+uv run --no-sync papercompass monitor metrics --workspace <workspace>
+uv run --no-sync papercompass monitor cost --workspace <workspace>
+uv run --no-sync papercompass monitor trends --workspace <workspace> --llm-cost-limit <usd_limit>
+uv run --no-sync python scripts/make_source_zip.py PaperCompass_source.zip
+uv run --no-sync python scripts/check_source_archive.py PaperCompass_source.zip
+uv run --no-sync python scripts/check_source_archive.py --strict PaperCompass_source.zip
+uv run --no-sync python scripts/test_source_archive.py PaperCompass_source.zip
+```
+
+`make_source_zip.py` 同时写 `PaperCompass_source.zip.manifest.json`，记录版本、git commit、文件数、archive sha256 和 release gate 命令。
 
 ## 🤖 给 Agent 的操作指南
 

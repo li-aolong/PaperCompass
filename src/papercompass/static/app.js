@@ -3,6 +3,7 @@ const state = {
   year: "",
   keyword: "",
   venue: "",
+  role: "",
   sort: "relevance",
   workspace: "",
   workspaces: [],
@@ -202,7 +203,7 @@ async function fetchJson(url) {
 function optionList(items, emptyLabel) {
   const head = `<option value="">${escapeHtml(emptyLabel)}</option>`;
   return head + items.map((item) => (
-    `<option value="${escapeHtml(item.value)}">${escapeHtml(item.value)} · ${item.count}</option>`
+    `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label || item.value)} · ${item.count}</option>`
   )).join("");
 }
 
@@ -244,6 +245,7 @@ function resetFilters() {
   state.year = "";
   state.keyword = "";
   state.venue = "";
+  state.role = "";
   state.sort = "relevance";
   resetSelection();
   resetPaging();
@@ -293,9 +295,11 @@ async function loadFilters() {
   $("yearFilter").innerHTML = optionList(filters.years || [], "All years");
   $("keywordFilter").innerHTML = optionList(filters.keywords || [], "All tags");
   $("venueFilter").innerHTML = optionList(filters.venues || [], "All venues");
+  $("roleFilter").innerHTML = optionList(filters.roles || [], "All roles");
   $("yearFilter").value = state.year;
   $("keywordFilter").value = state.keyword;
   $("venueFilter").value = state.venue;
+  $("roleFilter").value = state.role;
 }
 
 function updateActiveSummary(total = null, loaded = null) {
@@ -304,6 +308,7 @@ function updateActiveSummary(total = null, loaded = null) {
   if (state.year) parts.push(`year: ${state.year}`);
   if (state.keyword) parts.push(`tag: ${state.keyword}`);
   if (state.venue) parts.push(`venue: ${state.venue}`);
+  if (state.role) parts.push(`role: ${roleLabel(state.role)}`);
   parts.push(`sort: ${state.sort}`);
   const prefix = total === null ? "" : `${loaded ?? total} / ${total} loaded · `;
   $("activeSummary").textContent = prefix + (parts.length ? parts.join(" · ") : "All papers");
@@ -325,6 +330,39 @@ function tag(value, tone = "") {
 
 function tagList(values, tone = "", limit = 8) {
   return (values || []).slice(0, limit).map((value) => tag(value, tone)).join("");
+}
+
+const ROLE_BADGES = {
+  core_method: {label: "Core", tone: "role-core"},
+  mechanism_eval: {label: "Eval", tone: "role-eval"},
+  background_anchor: {label: "Anchor", tone: "role-anchor"},
+  boundary_negative: {label: "Negative", tone: "role-negative"},
+  out_of_scope: {label: "Out", tone: "role-negative"},
+};
+
+function roleLabel(role) {
+  const key = String(role || "");
+  return ROLE_BADGES[key]?.label || key.replaceAll("_", " ");
+}
+
+function roleBadge(paper) {
+  const role = paper?.paper_role || "";
+  if (!role) return "";
+  const badge = ROLE_BADGES[role] || {label: paper.role_label || roleLabel(role), tone: "role"};
+  return tag(badge.label, badge.tone);
+}
+
+function decisionBadge(paper) {
+  const label = paper?.decision_label || "";
+  return label ? tag(label, "decision") : "";
+}
+
+function paperBadges(paper) {
+  return [
+    roleBadge(paper),
+    decisionBadge(paper),
+    tagList((paper.tags || []).length ? paper.tags : paper.keyword_hits, "topic", 2),
+  ].filter(Boolean).join("");
 }
 
 function metricRow(label, value) {
@@ -481,7 +519,7 @@ function renderResultsFromState() {
         <div class="paper-meta">${resultMeta(paper)}</div>
       </div>
       <div class="paper-badges">
-        ${tagList((paper.tags || []).length ? paper.tags : paper.keyword_hits, "topic", 2)}
+        ${paperBadges(paper)}
       </div>
     </button>
   `).join("") + listFooter();
@@ -507,6 +545,7 @@ async function runSearch(options = {}) {
     year: state.year,
     keyword: state.keyword,
     venue: state.venue,
+    role: state.role,
     sort: state.sort,
     limit: String(state.limit),
     offset: String(append ? state.results.length : 0),
@@ -616,6 +655,7 @@ function renderDetail() {
         <span>${escapeHtml(paper.venue || "N/A")}</span>
         <span>${escapeHtml(fulltextLabel)}</span>
       </div>
+      <div class="detail-role-row">${roleBadge(paper)}${decisionBadge(paper)}</div>
       <h2 class="detail-title">${escapeHtml(paper.title)}</h2>
       <div class="detail-authors">${escapeHtml(paper.authors || "N/A")}</div>
 
@@ -659,6 +699,10 @@ function renderOverviewTab(paper) {
         <div class="signal-block">
           <h3>Tags</h3>
           <div class="tag-row">${tagList(paper.tags, "topic", 20) || tag("No tag", "muted")}</div>
+        </div>
+        <div class="signal-block">
+          <h3>Role</h3>
+          <div class="tag-row">${roleBadge(paper) || tag("No role", "muted")}</div>
         </div>
         <div class="signal-block">
           <h3>Sources</h3>
@@ -821,6 +865,11 @@ function bindEvents() {
     resetSelection();
     runSearch().catch(renderError);
   });
+  $("roleFilter").addEventListener("change", (event) => {
+    state.role = event.target.value;
+    resetSelection();
+    runSearch().catch(renderError);
+  });
   $("sortMode").addEventListener("change", (event) => {
     state.sort = event.target.value;
     resetSelection();
@@ -831,6 +880,7 @@ function bindEvents() {
     $("yearFilter").value = "";
     $("keywordFilter").value = "";
     $("venueFilter").value = "";
+    $("roleFilter").value = "";
     runSearch().catch(renderError);
   });
   $("resultsList").addEventListener("scroll", (event) => {

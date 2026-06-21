@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from papercompass.candidate_review import applied_decisions_path, workspace_decision_context_hash
 from papercompass.roles import ANCHOR_ROLES, MAIN_LIBRARY_ROLES
 from papercompass.text import iter_jsonl
@@ -17,6 +19,8 @@ def read_json(path: Path):
 
 
 def example_workspaces() -> list[Path]:
+    if not EXAMPLES_ROOT.exists():
+        pytest.skip("examples/ is not included in the sanitized source archive")
     return sorted(path for path in EXAMPLES_ROOT.iterdir() if (path / "topic.yaml").exists())
 
 

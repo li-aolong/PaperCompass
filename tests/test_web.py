@@ -1,6 +1,13 @@
 import json
+from pathlib import Path
 
-from papercompass.web import make_build_status, score_paper
+from papercompass.web import (
+    make_build_status,
+    make_filters,
+    paper_to_result,
+    score_paper,
+    search_papers,
+)
 
 
 def test_short_multiword_query_requires_all_terms() -> None:
@@ -96,3 +103,73 @@ def test_make_build_status_uses_latest_quality_counts_when_summary_is_stale(tmp_
     assert status["summary"]["counts"]["papers"] == 1
     assert status["summary"]["counts"]["pending"] == 2
     assert status["summary"]["safe_for_default_llm_retrieval"] is False
+
+
+def _write_web_workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "ws"
+    data = workspace / "data"
+    catalog = workspace / "catalog" / "index"
+    data.mkdir(parents=True)
+    catalog.mkdir(parents=True)
+    papers = [
+        {
+            "paper_key": "core",
+            "title": "Core decoding paper",
+            "year": 2025,
+            "venue": "ICLR",
+            "paper_role": "core_method",
+            "decision": {"reason": "fusion_accept"},
+            "tags": ["review:accepted", "speculative decoding"],
+            "keyword_hits": ["speculative decoding"],
+            "sources": ["openalex"],
+        },
+        {
+            "paper_key": "anchor",
+            "title": "Background anchor paper",
+            "year": 2024,
+            "venue": "arXiv",
+            "paper_role": "background_anchor",
+            "decision": {"reason": "required_seed_anchor"},
+            "tags": ["review:anchor"],
+            "keyword_hits": ["speculative sampling"],
+            "sources": ["arxiv"],
+        },
+    ]
+    (data / "papers.json").write_text(json.dumps(papers), encoding="utf-8")
+    (catalog / "by_year.json").write_text(
+        json.dumps({"2025": ["core"], "2024": ["anchor"]}),
+        encoding="utf-8",
+    )
+    return workspace
+
+
+def test_paper_to_result_exposes_role_badge_fields() -> None:
+    result = paper_to_result(
+        {
+            "paper_key": "p1",
+            "title": "Paper",
+            "paper_role": "core_method",
+            "decision": {"reason": "fusion_accept"},
+        }
+    )
+
+    assert result["paper_role"] == "core_method"
+    assert result["role_label"] == "Core"
+    assert result["decision_label"] == "fusion_accept"
+
+
+def test_web_filters_and_search_support_paper_role(tmp_path: Path) -> None:
+    workspace = _write_web_workspace(tmp_path)
+
+    filters = make_filters(workspace)
+    roles = {item["value"]: item for item in filters["roles"]}
+    assert roles["core_method"]["label"] == "Core"
+    assert roles["background_anchor"]["label"] == "Anchor"
+
+    result = search_papers(
+        workspace,
+        {"role": ["core_method"], "limit": ["10"], "offset": ["0"]},
+    )
+    assert result["total"] == 1
+    assert result["results"][0]["paper_key"] == "core"
+    assert result["results"][0]["role_label"] == "Core"

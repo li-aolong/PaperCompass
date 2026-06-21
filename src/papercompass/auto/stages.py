@@ -8,7 +8,6 @@ a dict that is recorded into the state file for audit / resume.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -39,8 +38,8 @@ from ..plugins.brain import BrainInvocationError
 from ..qa import build_quality_report
 from ..roles import BACKGROUND_ANCHOR, BOUNDARY_NEGATIVE, CORE_METHOD, NEGATIVE_ROLES, normalize_role, seed_required, seed_verified_source_backed
 from ..scope import publication_scope_from_topic, render_publication_scope
-from ..text import iter_jsonl, normalize_title, read_json
-from .brain_score import score_candidate_batch
+from ..text import append_jsonl_locked, clean_text, iter_jsonl, normalize_title, read_json, write_json, write_jsonl
+from .brain_score import reflect_candidate_batch, score_candidate_batch
 from .embed import score_candidates_against_topic
 from .fusion import (
     BoundaryThresholds,
@@ -57,12 +56,28 @@ from .lint import (
 )
 from .metadata import build_anchor_stats, metadata_score
 from .plan import inject_verified_seeds_to_raw, render_plan, write_plan
+from .prefilter import PrefilterDecision, PrefilterPipeline, summarize_prefilter
 from .prompts import (
     PLAN_PROMPT,
     plan_schema,
     render_candidate_block,
 )
 from .quality_gate import write_review_queue_diagnosis
+from .review_cache import (
+    REFLECTION_POLICY_VERSION,
+    REFLECTION_PROMPT_VERSION,
+    REFLECTION_SCHEMA_VERSION,
+    REVIEW_POLICY_VERSION,
+    REVIEW_PROMPT_VERSION,
+    REVIEW_SCHEMA_VERSION,
+    append_reflection_cache_rows,
+    append_review_cache_rows,
+    brain_model_name,
+    candidate_fingerprint,
+    load_review_cache,
+    review_cache_key,
+    topic_context_hash,
+)
 from .state import AutoState, log_brain_call
 
 
@@ -81,6 +96,7 @@ def stage_plan_direction(
     topic_id_override: str | None = None,
     prior_markdown: str | None = None,
     seed_cap: int | None = None,
+    original_query: str | None = None,
 ) -> dict[str, Any]:
     if state.stage_done("plan_direction") and (workspace / "topic.yaml").exists():
         topic = load_topic_config(workspace)
@@ -226,6 +242,7 @@ def stage_plan_direction(
         plan,
         direction,
         topic_id_override=topic_id_override,
+        original_query=original_query,
     )
     if topic_id_override:
         plan["topic_id"] = topic_yaml.get("topic_id")
@@ -234,7 +251,7 @@ def stage_plan_direction(
     injected_count = inject_verified_seeds_to_raw(workspace, plan.get("seed_papers") or [])
     raw_plan_path = state_dir(workspace) / "auto" / "plan_response.json"
     raw_plan_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(raw_plan_path, plan)
 
     record_agent_run_step(
         workspace,
@@ -291,7 +308,7 @@ def stage_discover(
         max_year=None,
         refresh=refresh,
         build=True,
-        catalog=True,
+        catalog=False,
         paperlists_venues=None,
         timeout=35,
         max_remote_calls=max_remote_calls,
@@ -464,9 +481,7 @@ def stage_seed_repair(
         manual_dir = raw_dir(workspace) / "manual"
         manual_dir.mkdir(parents=True, exist_ok=True)
         out_path = manual_dir / f"{_dt.now().strftime('%Y%m%d_%H%M%S')}_auto_seed_repair_batch.jsonl"
-        with out_path.open("w", encoding="utf-8") as handle:
-            for row in seed_rows:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        write_jsonl(out_path, seed_rows)
     state.end_stage(
         stage,
         status="completed",
@@ -595,6 +610,10 @@ def _review_decision_for_score(verdict: str, paper_role: str, brain_score: int |
     role = normalize_role(paper_role, default=CORE_METHOD)
     if role == BOUNDARY_NEGATIVE:
         return "reject", "keep_rejected"
+    if brain_score is None:
+        if verdict == "out_of_scope":
+            return "reject", "keep_rejected"
+        return "defer", "keep_pending"
     if role == BACKGROUND_ANCHOR and (brain_score is not None and brain_score >= 35 or fused_score >= 40):
         return "anchor", "add_to_anchor"
     if verdict == "in_scope":
@@ -716,6 +735,31 @@ def stage_score_papers(
             required_seed_roles_by_key[key] = role
 
     topic = load_topic_config(workspace)
+    prefilter_cfg = topic.get("prefilter") if isinstance(topic.get("prefilter"), dict) else {}
+    prefilter = PrefilterPipeline(topic, prefilter_cfg)
+    candidate_dicts = [cand if isinstance(cand, dict) else {} for cand in candidates]
+    prefilter_decisions, prefilter_review_indices = prefilter.partition(
+        candidate_dicts,
+        protected_keys=set(required_seed_roles_by_key),
+    )
+    prefilter_path = data_dir(workspace) / "prefilter_decisions.jsonl"
+    write_jsonl(
+        prefilter_path,
+        [
+            {
+                **decision.to_dict(),
+                "candidate_key": decision.candidate_key or (candidate_dicts[idx].get("candidate_key") or ""),
+                "title": candidate_dicts[idx].get("title", ""),
+                "year": candidate_dicts[idx].get("year"),
+                "sent_to_llm": idx in set(prefilter_review_indices),
+            }
+            for idx, decision in enumerate(prefilter_decisions)
+        ],
+    )
+    prefilter_summary = summarize_prefilter(
+        prefilter_decisions,
+        review_indices=prefilter_review_indices,
+    )
     direction_raw = topic.get("direction_raw") or topic.get("name") or topic.get("topic_id") or ""
     judge_examples = topic.get("judge_examples") or {"in_scope": [], "out_of_scope": []}
     publication_scope_text = render_publication_scope(publication_scope_from_topic(topic))
@@ -744,8 +788,9 @@ def stage_score_papers(
     # a long brain run is interrupted (codex / opencode mid-stage death,
     # SIGTERM from a wrapping task scheduler, etc.). Stable workspace-level
     # path so a re-run finds the cache even though build_weak_candidate_review
-    # generates a fresh queue file each call. candidate_key is stable across
-    # runs, so cached scores keyed by it remain valid.
+    # generates a fresh queue file each call. Rows carry review cache v2 keys
+    # that include candidate fingerprint, topic context, prompt/schema/policy,
+    # brain, and model, so stale scores are not reused across changed inputs.
     partial_path = workspace / ".papercompass" / "auto" / "score_papers_partial.jsonl"
     partial_path.parent.mkdir(parents=True, exist_ok=True)
     if decisions_path.exists() and decisions_path.stat().st_size > 0:
@@ -765,8 +810,48 @@ def stage_score_papers(
     brain_scores: dict[str, int] = {}
     brain_reasons: dict[str, str] = {}
     brain_roles: dict[str, str] = {}
+    brain_confidence: dict[str, float] = {}
+    brain_inclusion_evidence: dict[str, list[str]] = {}
+    brain_exclusion_evidence: dict[str, list[str]] = {}
+    brain_missing_information: dict[str, list[str]] = {}
     brain_errors = 0
     batches_done = 0
+    actual_brain_scored_keys: set[str] = set()
+    topic_hash = topic_context_hash(topic)
+    model_name = brain_model_name(brain)
+    candidate_by_key = {
+        (cand.get("candidate_key") or "").strip(): cand
+        for cand in candidate_dicts
+        if (cand.get("candidate_key") or "").strip()
+    }
+    cache_keys_by_candidate = {
+        key: review_cache_key(
+            candidate=cand,
+            topic_hash=topic_hash,
+            brain_name=brain.name,
+            model_name=model_name,
+        )
+        for key, cand in candidate_by_key.items()
+    }
+    v2_cache = load_review_cache(workspace)
+    v2_loaded = 0
+    for key, cache_key in cache_keys_by_candidate.items():
+        cached = v2_cache.get(cache_key)
+        decision = cached.get("decision") if isinstance(cached, dict) else None
+        if not isinstance(decision, dict):
+            continue
+        brain_scores[key] = decision.get("score")
+        brain_reasons[key] = decision.get("reason") or ""
+        brain_roles[key] = normalize_role(decision.get("paper_role"), default=CORE_METHOD)
+        brain_confidence[key] = decision.get("confidence") or 0.0
+        brain_inclusion_evidence[key] = list(decision.get("inclusion_evidence") or [])
+        brain_exclusion_evidence[key] = list(decision.get("exclusion_evidence") or [])
+        brain_missing_information[key] = list(decision.get("missing_information") or [])
+        v2_loaded += 1
+    if v2_loaded:
+        state._log_progress(
+            f"[score_papers] loaded {v2_loaded} scores from review cache v2"
+        )
     if partial_path.exists():
         loaded = 0
         for line in partial_path.read_text(encoding="utf-8").splitlines():
@@ -780,15 +865,24 @@ def stage_score_papers(
             key = (row.get("candidate_key") or "").strip()
             if not key:
                 continue
+            if row.get("cache_key") and row.get("cache_key") != cache_keys_by_candidate.get(key):
+                continue
             brain_scores[key] = row.get("score")
             brain_reasons[key] = row.get("reason") or ""
             brain_roles[key] = normalize_role(row.get("paper_role"), default=CORE_METHOD)
+            brain_confidence[key] = row.get("confidence") or 0.0
+            brain_inclusion_evidence[key] = list(row.get("inclusion_evidence") or [])
+            brain_exclusion_evidence[key] = list(row.get("exclusion_evidence") or [])
+            brain_missing_information[key] = list(row.get("missing_information") or [])
             loaded += 1
+        partial_loaded = loaded
         if loaded:
             state._log_progress(
                 f"[score_papers] resumed from {partial_path.name}: "
                 f"{loaded} cached brain scores"
             )
+    else:
+        partial_loaded = 0
 
     # Embedding-based pre-rank: brain only sees the top-K by emb similarity.
     # The remaining candidates get fused on meta + brain (which may be None
@@ -801,30 +895,31 @@ def stage_score_papers(
         if max_batches is not None
         else len(candidates)
     )
+    eligible_indices = list(prefilter_review_indices)
     if any(s is not None for s in emb_scores):
-        indices_by_emb = sorted(
-            range(len(candidates)),
-            key=lambda i: (emb_scores[i] if i < len(emb_scores) and emb_scores[i] is not None else -1.0),
+        ranked_indices = sorted(
+            eligible_indices,
+            key=lambda i: (
+                emb_scores[i] if i < len(emb_scores) and emb_scores[i] is not None else -1.0,
+                prefilter_decisions[i].score if i < len(prefilter_decisions) else 0.0,
+            ),
             reverse=True,
         )
-        protected = [
-            i for i, c in enumerate(candidates)
-            if isinstance(c, dict)
-            and (c.get("candidate_key") or "").strip() in required_seed_roles_by_key
-        ]
-        protected_set = set(protected)
-        top_k_indices = (protected + [i for i in indices_by_emb if i not in protected_set])[:rerank_top_k]
     else:
-        protected = [
-            i for i, c in enumerate(candidates)
-            if isinstance(c, dict)
-            and (c.get("candidate_key") or "").strip() in required_seed_roles_by_key
-        ]
-        protected_set = set(protected)
-        top_k_indices = (
-            protected
-            + [i for i in range(len(candidates)) if i not in protected_set]
-        )[: min(rerank_top_k, len(candidates))]
+        ranked_indices = sorted(
+            eligible_indices,
+            key=lambda i: prefilter_decisions[i].score if i < len(prefilter_decisions) else 0.0,
+            reverse=True,
+        )
+    protected = [
+        i for i in eligible_indices
+        if i < len(prefilter_decisions) and prefilter_decisions[i].action == "protected"
+    ]
+    protected_set = set(protected)
+    top_k_indices = (
+        protected
+        + [i for i in ranked_indices if i not in protected_set]
+    )[: min(rerank_top_k, len(eligible_indices))]
     top_k_candidates = [candidates[i] for i in top_k_indices]
     total_batches = (len(top_k_candidates) + batch_size - 1) // max(batch_size, 1)
     if max_batches is not None:
@@ -920,104 +1015,153 @@ def stage_score_papers(
         # Append THIS batch's scores to the partial cache and update the
         # in-memory dicts atomically per batch. fsync after the write so a
         # SIGKILL doesn't lose the batch we just paid the brain for.
-        with partial_path.open("a", encoding="utf-8") as cache_f:
-            for row in batch_score_rows:
-                key = (row.get("candidate_key") or "").strip()
-                if not key:
-                    continue
-                brain_scores[key] = row["score"]
-                brain_reasons[key] = row.get("reason") or ""
-                brain_roles[key] = normalize_role(row.get("paper_role"), default=CORE_METHOD)
-                cache_f.write(
-                    json.dumps(
-                        {"candidate_key": key,
-                         "score": row["score"],
-                         "paper_role": brain_roles[key],
-                         "reason": row.get("reason") or ""},
-                        ensure_ascii=False,
-                    ) + "\n"
-                )
-            cache_f.flush()
-            try:
-                os.fsync(cache_f.fileno())
-            except OSError:
-                pass
+        v2_rows: list[dict[str, Any]] = []
+        partial_rows: list[dict[str, Any]] = []
+        for row in batch_score_rows:
+            key = (row.get("candidate_key") or "").strip()
+            if not key:
+                continue
+            actual_brain_scored_keys.add(key)
+            cache_key = cache_keys_by_candidate.get(key, "")
+            candidate = candidate_by_key.get(key, {})
+            brain_scores[key] = row["score"]
+            brain_reasons[key] = row.get("reason") or ""
+            brain_roles[key] = normalize_role(row.get("paper_role"), default=CORE_METHOD)
+            brain_confidence[key] = row.get("confidence") or 0.0
+            brain_inclusion_evidence[key] = list(row.get("inclusion_evidence") or [])
+            brain_exclusion_evidence[key] = list(row.get("exclusion_evidence") or [])
+            brain_missing_information[key] = list(row.get("missing_information") or [])
+            decision_payload = {
+                "score": row["score"],
+                "paper_role": brain_roles[key],
+                "confidence": brain_confidence[key],
+                "inclusion_evidence": brain_inclusion_evidence[key],
+                "exclusion_evidence": brain_exclusion_evidence[key],
+                "missing_information": brain_missing_information[key],
+                "reason": row.get("reason") or "",
+            }
+            partial_rows.append({
+                "candidate_key": key,
+                "cache_key": cache_key,
+                "score": row["score"],
+                "paper_role": brain_roles[key],
+                "confidence": brain_confidence[key],
+                "inclusion_evidence": brain_inclusion_evidence[key],
+                "exclusion_evidence": brain_exclusion_evidence[key],
+                "missing_information": brain_missing_information[key],
+                "reason": row.get("reason") or "",
+            })
+            if cache_key and candidate:
+                v2_rows.append({
+                    "cache_key": cache_key,
+                    "candidate_key": key,
+                    "candidate_fingerprint": candidate_fingerprint(candidate),
+                    "topic_context_hash": topic_hash,
+                    "prompt_version": REVIEW_PROMPT_VERSION,
+                    "schema_version": REVIEW_SCHEMA_VERSION,
+                    "policy_version": REVIEW_POLICY_VERSION,
+                    "brain": brain.name,
+                    "model": model_name,
+                    "created_at": _dt.now().isoformat(timespec="seconds"),
+                    "usage": result.get("usage") or {},
+                    "decision": decision_payload,
+                })
+        append_jsonl_locked(partial_path, partial_rows)
+        append_review_cache_rows(workspace, v2_rows)
 
     # Aggregate per-candidate scores into a decisions file
     counts = {"in_scope": 0, "boundary": 0, "out_of_scope": 0}
     boundary_rows: list[dict[str, Any]] = []
-    with decisions_path.open("w", encoding="utf-8") as handle:
-        for idx, cand in enumerate(candidates):
-            if not isinstance(cand, dict):
-                continue
-            key = (cand.get("candidate_key") or "").strip()
-            if not key:
-                continue
-            emb = emb_scores[idx] if idx < len(emb_scores) else None
-            brain_val = brain_scores.get(key)
-            required_seed_role = required_seed_roles_by_key.get(key, "")
-            paper_role = required_seed_role or brain_roles.get(key) or normalize_role(cand.get("paper_role"), default=CORE_METHOD)
-            meta = metadata_score(cand, anchor_stats)
-            fused = fuse_and_verdict_with_policy(emb, brain_val, meta, weights, thresholds)
-            row = {
-                "candidate_key": key,
-                "title": cand.get("title", ""),
-                "year": cand.get("year"),
-                "score": fused["score"],
-                "verdict": fused["verdict"],
-                "paper_role": paper_role,
-                "required_seed_role": required_seed_role,
-                "policy": fused.get("policy", "fused"),
-                "emb_score": emb,
-                "brain_score": brain_val,
-                "meta_score": meta,
-                "reason": brain_reasons.get(key, ""),
-            }
-            counts[fused["verdict"]] = counts.get(fused["verdict"], 0) + 1
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-            if fused["verdict"] == "boundary":
-                boundary_rows.append(row)
+    decision_rows: list[dict[str, Any]] = []
+    for idx, cand in enumerate(candidates):
+        if not isinstance(cand, dict):
+            continue
+        key = (cand.get("candidate_key") or "").strip()
+        if not key:
+            continue
+        emb = emb_scores[idx] if idx < len(emb_scores) else None
+        pre = prefilter_decisions[idx] if idx < len(prefilter_decisions) else PrefilterDecision("reject", 0.0, [], [], [])
+        brain_val = brain_scores.get(key)
+        required_seed_role = required_seed_roles_by_key.get(key, "")
+        paper_role = required_seed_role or brain_roles.get(key) or normalize_role(cand.get("paper_role"), default=CORE_METHOD)
+        meta = metadata_score(cand, anchor_stats)
+        fused = fuse_and_verdict_with_policy(emb, brain_val, meta, weights, thresholds)
+        row = {
+            "candidate_key": key,
+            "title": cand.get("title", ""),
+            "year": cand.get("year"),
+            "score": fused["score"],
+            "verdict": fused["verdict"],
+            "paper_role": paper_role,
+            "required_seed_role": required_seed_role,
+            "policy": fused.get("policy", "fused"),
+            "emb_score": emb,
+            "brain_score": brain_val,
+            "meta_score": meta,
+            "prefilter_action": pre.action,
+            "prefilter_score": pre.score,
+            "prefilter_reasons": pre.reasons,
+            "prefilter_topic_hits": pre.topic_hits,
+            "prefilter_negative_hits": pre.negative_hits,
+            "brain_confidence": brain_confidence.get(key, ""),
+            "inclusion_evidence": brain_inclusion_evidence.get(key, []),
+            "exclusion_evidence": brain_exclusion_evidence.get(key, []),
+            "missing_information": brain_missing_information.get(key, []),
+            "reason": brain_reasons.get(key, ""),
+        }
+        counts[fused["verdict"]] = counts.get(fused["verdict"], 0) + 1
+        decision_rows.append(row)
+        if fused["verdict"] == "boundary":
+            boundary_rows.append(row)
+    write_jsonl(decisions_path, decision_rows)
 
     review_decisions_path = decisions_path.with_name(
         decisions_path.stem.replace("score_decisions_", "review_decisions_") + ".jsonl"
     )
-    with review_decisions_path.open("w", encoding="utf-8") as handle:
-        for line in decisions_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            verdict = r["verdict"]
-            required_seed_role = (r.get("required_seed_role") or "").strip()
-            if required_seed_role == BACKGROUND_ANCHOR:
-                decision, action = "anchor", "required_seed_anchor"
-            elif required_seed_role:
-                decision, action = "accept", "required_seed_main"
-            else:
-                decision, action = _review_decision_for_score(
-                    verdict,
-                    r.get("paper_role") or CORE_METHOD,
-                    r.get("brain_score"),
-                    float(r.get("score") or 0.0),
-                )
-            handle.write(
-                json.dumps(
-                    {
-                        "candidate_key": r["candidate_key"],
-                        "title": r["title"],
-                        "year": r["year"],
-                        "decision": decision,
-                        "paper_role": r.get("paper_role") or CORE_METHOD,
-                        "reason": (
-                            f"required_seed_role={required_seed_role}"
-                            if required_seed_role
-                            else r["reason"] or f"score={r['score']} (emb={r['emb_score']} brain={r['brain_score']} meta={r['meta_score']})"
-                        ),
-                        "action": action,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
+    review_decision_rows: list[dict[str, Any]] = []
+    for r in decision_rows:
+        verdict = r["verdict"]
+        required_seed_role = (r.get("required_seed_role") or "").strip()
+        if required_seed_role == BACKGROUND_ANCHOR:
+            decision, action = "anchor", "required_seed_anchor"
+        elif required_seed_role:
+            decision, action = "accept", "required_seed_main"
+        elif r.get("prefilter_action") in {"reject", "hard_reject"}:
+            decision, action = "reject", f"prefilter_{r.get('prefilter_action')}"
+        elif r.get("prefilter_action") == "strong" and r.get("brain_score") is None:
+            decision, action = "defer", "prefilter_strong_needs_review"
+        else:
+            decision, action = _review_decision_for_score(
+                verdict,
+                r.get("paper_role") or CORE_METHOD,
+                r.get("brain_score"),
+                float(r.get("score") or 0.0),
             )
+        review_decision_rows.append({
+            "candidate_key": r["candidate_key"],
+            "title": r["title"],
+            "year": r["year"],
+            "decision": decision,
+            "paper_role": r.get("paper_role") or CORE_METHOD,
+            "confidence": r.get("brain_confidence") if r.get("brain_confidence") is not None else "",
+            "inclusion_evidence": r.get("inclusion_evidence") or [],
+            "exclusion_evidence": r.get("exclusion_evidence") or [],
+            "missing_information": r.get("missing_information") or [],
+            "reason": (
+                f"required_seed_role={required_seed_role}"
+                if required_seed_role
+                else (
+                    "prefilter_reject: "
+                    + ", ".join(r.get("prefilter_reasons") or [])
+                )
+                if action.startswith("prefilter_reject") or action == "prefilter_hard_reject"
+                else "prefilter_strong_needs_review"
+                if action == "prefilter_strong_needs_review"
+                else r["reason"] or f"score={r['score']} (emb={r['emb_score']} brain={r['brain_score']} meta={r['meta_score']})"
+            ),
+            "action": action,
+        })
+    write_jsonl(review_decisions_path, review_decision_rows)
 
     validation = validate_review_decisions(queue_path, review_decisions_path)
     apply_result: dict[str, Any] = {"appended": 0, "skipped_invalid": True}
@@ -1037,9 +1181,27 @@ def stage_score_papers(
     reviewed_score_keys = _candidate_key_set(top_k_candidates[: batches_done * batch_size])
     brain_missing_scores = len([k for k in reviewed_score_keys if k not in brain_scores])
     truncated = (max_batches is not None) and (
-        batches_done * batch_size < len(candidates)
+        batches_done * batch_size < len(top_k_candidates)
     )
-    uncovered_capped = max(0, len(candidates) - batches_done * batch_size) if truncated else 0
+    uncovered_capped = max(0, len(top_k_candidates) - batches_done * batch_size) if truncated else 0
+    # Distinguish "truncated by budget" (info) from "sent to brain but lost"
+    # (warning).  brain_missing_scores counts keys in the reviewed window
+    # (top_k_candidates[:batches_done*batch_size]) that have no brain score.
+    # uncovered_capped counts candidates beyond the review window entirely.
+    brain_missing_explanation = (
+        f"{brain_missing_scores} candidates sent to brain but not scored"
+        if brain_missing_scores
+        else ""
+    )
+    if uncovered_capped:
+        truncation_explanation = (
+            f"{uncovered_capped} candidates not reviewed (embedding-only scoring) "
+            f"due to --weak-max-batches budget; pass --weak-max-batches "
+            f"{(len(candidates) + batch_size - 1) // max(batch_size, 1)} "
+            f"to cover all"
+        )
+    else:
+        truncation_explanation = ""
     state.end_stage(
         "score_papers",
         status="completed",
@@ -1052,8 +1214,16 @@ def stage_score_papers(
         batches=batches_done,
         brain_errors=brain_errors,
         brain_missing_scores=brain_missing_scores,
+        brain_missing_explanation=brain_missing_explanation,
+        prefilter=prefilter_summary,
+        prefilter_decisions=str(prefilter_path),
+        prefilter_filtered_count=max(0, len(candidates) - len(prefilter_review_indices)),
+        review_cache_hit_count=v2_loaded,
+        review_cache_miss_count=len(actual_brain_scored_keys),
+        partial_cache_hit_count=partial_loaded,
         truncated=truncated,
         truncation_reason="max_batches_reached" if truncated else None,
+        truncation_explanation=truncation_explanation,
         uncovered_capped=uncovered_capped,
     )
     return {
@@ -1062,9 +1232,19 @@ def stage_score_papers(
         "counts": counts,
         "boundary_count": len(boundary_rows),
         "applied": apply_result,
+        "prefilter": prefilter_summary,
+        "prefilter_decisions": str(prefilter_path),
         "truncated": truncated,
         "uncovered_capped": uncovered_capped,
         "brain_missing_scores": brain_missing_scores,
+        "review_cache": {
+            "hit_count": v2_loaded,
+            "miss_count": len(actual_brain_scored_keys),
+            "hit_rate": round(v2_loaded / (v2_loaded + len(actual_brain_scored_keys)), 3)
+            if (v2_loaded + len(actual_brain_scored_keys))
+            else None,
+            "partial_cache_hit_count": partial_loaded,
+        },
     }
 
 
@@ -1114,6 +1294,55 @@ def stage_resolve_boundary(
         state.end_stage("resolve_boundary", status="skipped", note="no boundary papers")
         return {"status": "skipped", "boundary_count": 0}
 
+    def _float_or_none(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _reflection_reasons(row: dict[str, Any]) -> list[str]:
+        reasons: list[str] = []
+        score = _float_or_none(row.get("score"))
+        brain_score = _float_or_none(row.get("brain_score"))
+        confidence = _float_or_none(row.get("brain_confidence"))
+        prefilter_action = clean_text(row.get("prefilter_action")).lower()
+        inclusion = row.get("inclusion_evidence") or []
+        exclusion = row.get("exclusion_evidence") or []
+        if inclusion and exclusion:
+            reasons.append("conflicting_evidence")
+        if confidence is not None and confidence < 0.65:
+            reasons.append("low_brain_confidence")
+        if prefilter_action == "strong" and brain_score is not None and brain_score < 50.0:
+            reasons.append("prefilter_strong_brain_low")
+        if prefilter_action in {"reject", "hard_reject"} and brain_score is not None and brain_score >= 70.0:
+            reasons.append("prefilter_reject_brain_high")
+        if brain_score is not None and 45.0 <= brain_score <= 55.0:
+            reasons.append("mid_brain_score")
+        elif (
+            score is not None
+            and 52.0 <= score < 60.0
+            and brain_score is not None
+            and 55.0 < brain_score < 65.0
+            and confidence is not None
+            and confidence < 0.75
+        ):
+            reasons.append("near_boundary_center")
+        return reasons
+
+    initial_reviews_by_key = {
+        (row.get("candidate_key") or ""): {
+            "verdict": row.get("verdict"),
+            "score": row.get("score"),
+            "brain_score": row.get("brain_score"),
+            "prefilter_action": row.get("prefilter_action"),
+            "inclusion_evidence": row.get("inclusion_evidence") or [],
+            "exclusion_evidence": row.get("exclusion_evidence") or [],
+            "reason": row.get("reason") or "",
+        }
+        for row in boundary
+        if row.get("candidate_key")
+    }
+
     pending_by_key = {
         (p.get("candidate_key") or ""): p
         for p in pending
@@ -1135,17 +1364,39 @@ def stage_resolve_boundary(
     publication_scope_text = render_publication_scope(publication_scope_from_topic(topic))
 
     judge_brain = second_brain or brain
+    reflection_topic_hash = topic_context_hash(topic)
+    reflection_model_name = brain_model_name(judge_brain)
 
     # Assemble boundary candidates with full info from pending_by_key
     boundary_candidates = []
+    reflection_candidates = []
+    reflection_reasons_by_key: dict[str, list[str]] = {}
     for r in boundary:
         key = r["candidate_key"]
         cand = pending_by_key.get(key)
         if not cand:
             continue
         boundary_candidates.append(cand)
+        reasons = _reflection_reasons(r)
+        if reasons:
+            reflection_candidates.append(cand)
+            reflection_reasons_by_key[key] = reasons
 
+    reflection_cache_keys_by_candidate = {
+        key: review_cache_key(
+            candidate=cand,
+            topic_hash=reflection_topic_hash,
+            brain_name=judge_brain.name,
+            model_name=reflection_model_name,
+            prompt_version=REFLECTION_PROMPT_VERSION,
+            schema_version=REFLECTION_SCHEMA_VERSION,
+            policy_version=REFLECTION_POLICY_VERSION,
+        )
+        for key, cand in pending_by_key.items()
+        if key
+    }
     second_scores: dict[str, int] = {}
+    reflection_rows_by_key: dict[str, dict[str, Any]] = {}
     batches_done = 0
     brain_errors = 0
     # Resume cache for boundary scoring — stable workspace-level path keyed
@@ -1164,18 +1415,23 @@ def stage_resolve_boundary(
             except json.JSONDecodeError:
                 continue
             key = (row.get("candidate_key") or "").strip()
+            if not key:
+                continue
+            if row.get("cache_key") != reflection_cache_keys_by_candidate.get(key):
+                continue
             if key:
                 second_scores[key] = row.get("score")
+                reflection_rows_by_key[key] = row
                 loaded += 1
         if loaded:
             state._log_progress(
                 f"[resolve_boundary] resumed from {resolve_partial_path.name}: "
                 f"{loaded} cached second-brain scores"
             )
-    total_batches = (len(boundary_candidates) + batch_size - 1) // max(batch_size, 1)
+    total_batches = (len(reflection_candidates) + batch_size - 1) // max(batch_size, 1)
     if max_batches is not None:
         total_batches = min(total_batches, max_batches)
-    for batch_idx, batch in enumerate(_chunked(boundary_candidates, batch_size)):
+    for batch_idx, batch in enumerate(_chunked(reflection_candidates, batch_size)):
         if max_batches is not None and batch_idx >= max_batches:
             break
         batches_done = batch_idx + 1
@@ -1191,9 +1447,10 @@ def stage_resolve_boundary(
             )
             continue
         compact = _compact_for_review(batch)
-        result = score_candidate_batch(
+        result = reflect_candidate_batch(
             judge_brain,
             compact,
+            initial_reviews=initial_reviews_by_key,
             direction_raw=direction_raw,
             judge_examples=judge_examples,
             publication_scope=publication_scope_text,
@@ -1222,9 +1479,10 @@ def stage_resolve_boundary(
             returned_keys=_score_key_set(batch_score_rows),
         )
         if missing_for_retry and not result.get("error"):
-            retry_result = score_candidate_batch(
+            retry_result = reflect_candidate_batch(
                 judge_brain,
                 _compact_for_review(missing_for_retry),
+                initial_reviews=initial_reviews_by_key,
                 direction_raw=direction_raw,
                 judge_examples=judge_examples,
                 publication_scope=publication_scope_text,
@@ -1254,23 +1512,51 @@ def stage_resolve_boundary(
             if retry_result.get("error"):
                 brain_errors += 1
             batch_score_rows.extend(retry_result["scores"])
-        with resolve_partial_path.open("a", encoding="utf-8") as cache_f:
-            for row in batch_score_rows:
-                key = (row.get("candidate_key") or "").strip()
-                if not key:
-                    continue
-                second_scores[key] = row["score"]
-                cache_f.write(
-                    json.dumps(
-                        {"candidate_key": key, "score": row["score"]},
-                        ensure_ascii=False,
-                    ) + "\n"
-                )
-            cache_f.flush()
-            try:
-                os.fsync(cache_f.fileno())
-            except OSError:
-                pass
+        reflection_cache_rows: list[dict[str, Any]] = []
+        resolve_partial_rows: list[dict[str, Any]] = []
+        for row in batch_score_rows:
+            key = (row.get("candidate_key") or "").strip()
+            if not key:
+                continue
+            second_scores[key] = row["score"]
+            reflection_rows_by_key[key] = row
+            cache_key = reflection_cache_keys_by_candidate.get(key, "")
+            cand = pending_by_key.get(key, {})
+            resolve_partial_rows.append({
+                "cache_key": cache_key,
+                "candidate_key": key,
+                "candidate_fingerprint": candidate_fingerprint(cand) if cand else "",
+                "topic_context_hash": reflection_topic_hash,
+                "reflection_prompt_version": REFLECTION_PROMPT_VERSION,
+                "reflection_schema_version": REFLECTION_SCHEMA_VERSION,
+                "reflection_policy_version": REFLECTION_POLICY_VERSION,
+                "brain": judge_brain.name,
+                "model": reflection_model_name,
+                "score": row["score"],
+                "confidence": row.get("confidence", 0.0),
+                "counterevidence_found": row.get("counterevidence_found", False),
+                "inclusion_evidence": row.get("inclusion_evidence") or [],
+                "exclusion_evidence": row.get("exclusion_evidence") or [],
+                "missing_information": row.get("missing_information") or [],
+                "reason": row.get("reason") or "",
+            })
+            reflection_cache_rows.append({
+                "cache_key": cache_key,
+                "candidate_key": key,
+                "candidate_fingerprint": candidate_fingerprint(cand) if cand else "",
+                "topic_context_hash": reflection_topic_hash,
+                "prompt_version": REFLECTION_PROMPT_VERSION,
+                "schema_version": REFLECTION_SCHEMA_VERSION,
+                "policy_version": REFLECTION_POLICY_VERSION,
+                "brain": judge_brain.name,
+                "model": reflection_model_name,
+                "created_at": _dt.now().isoformat(timespec="seconds"),
+                "initial_review": initial_reviews_by_key.get(key, {}),
+                "reflection": row,
+                "usage": result.get("usage") or {},
+            })
+        append_jsonl_locked(resolve_partial_path, resolve_partial_rows)
+        append_reflection_cache_rows(workspace, reflection_cache_rows)
 
     # Compute final verdicts for boundary papers
     boundary_resolution: dict[str, str] = {}  # candidate_key → "in_scope" / "out_of_scope"
@@ -1282,82 +1568,85 @@ def stage_resolve_boundary(
     review_decisions_path = score_files[0].with_name(
         score_files[0].stem.replace("score_decisions_", "review_decisions_resolved_") + ".jsonl"
     )
-    with decisions_path.open("w", encoding="utf-8") as f_dec:
-        for r in boundary:
-            key = r["candidate_key"]
-            second = second_scores.get(key)
-            cand = pending_by_key.get(key, {})
-            meta_val = metadata_score(cand, anchor_stats) if cand else 0.0
-            verdict = resolve_boundary(r, second, meta_val, thresholds)
-            boundary_resolution[key] = verdict
-            boundary_meta[key] = {"second_brain_score": second, "meta_score": meta_val}
-            final_counts[verdict] += 1
-            f_dec.write(
-                json.dumps(
-                    {
-                        "candidate_key": key,
-                        "title": r.get("title", ""),
-                        "year": r.get("year"),
-                        "first_score": r.get("score"),
-                        "second_brain_score": second,
-                        "meta_score": meta_val,
-                        "final_verdict": verdict,
-                        "paper_role": r.get("paper_role") or CORE_METHOD,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
+    boundary_resolution_rows: list[dict[str, Any]] = []
+    for r in boundary:
+        key = r["candidate_key"]
+        second = second_scores.get(key)
+        reflection = reflection_rows_by_key.get(key, {})
+        cand = pending_by_key.get(key, {})
+        meta_val = metadata_score(cand, anchor_stats) if cand else 0.0
+        verdict = resolve_boundary(r, second, meta_val, thresholds)
+        boundary_resolution[key] = verdict
+        boundary_meta[key] = {"second_brain_score": second, "meta_score": meta_val}
+        final_counts[verdict] += 1
+        boundary_resolution_rows.append({
+            "candidate_key": key,
+            "title": r.get("title", ""),
+            "year": r.get("year"),
+            "first_score": r.get("score"),
+            "reflection_required": key in reflection_reasons_by_key,
+            "reflection_reasons": reflection_reasons_by_key.get(key, []),
+            "second_brain_score": second,
+            "reflection_confidence": reflection.get("confidence"),
+            "counterevidence_found": reflection.get("counterevidence_found"),
+            "reflection_reason": reflection.get("reason", ""),
+            "reflection_inclusion_evidence": reflection.get("inclusion_evidence") or [],
+            "reflection_exclusion_evidence": reflection.get("exclusion_evidence") or [],
+            "reflection_missing_information": reflection.get("missing_information") or [],
+            "meta_score": meta_val,
+            "final_verdict": verdict,
+            "paper_role": r.get("paper_role") or CORE_METHOD,
+        })
+    write_jsonl(decisions_path, boundary_resolution_rows)
 
     # Write a full-coverage review decisions file that mirrors the original
     # score_decisions but flips boundary papers to their resolved verdict.
-    with review_decisions_path.open("w", encoding="utf-8") as f_leg:
-        for r in score_lines:
-            key = r["candidate_key"]
-            required_seed_role = _required_seed_role_for_review_row(
-                r,
-                pending_by_key,
-                seed_role_index,
+    resolved_review_rows: list[dict[str, Any]] = []
+    for r in score_lines:
+        key = r["candidate_key"]
+        required_seed_role = _required_seed_role_for_review_row(
+            r,
+            pending_by_key,
+            seed_role_index,
+        )
+        if r["verdict"] == "boundary":
+            final_v = boundary_resolution.get(key, "out_of_scope")
+            meta = boundary_meta.get(key, {})
+            reason = (
+                f"boundary_resolved second_brain={meta.get('second_brain_score')} "
+                f"meta={meta.get('meta_score')}"
             )
-            if r["verdict"] == "boundary":
-                final_v = boundary_resolution.get(key, "out_of_scope")
-                meta = boundary_meta.get(key, {})
-                reason = (
-                    f"boundary_resolved second_brain={meta.get('second_brain_score')} "
-                    f"meta={meta.get('meta_score')}"
-                )
-            else:
-                final_v = r["verdict"]
-                reason = r.get("reason") or f"score_papers verdict={final_v}"
-            paper_role = required_seed_role or r.get("paper_role") or CORE_METHOD
-            if required_seed_role == BACKGROUND_ANCHOR:
-                decision, action = "anchor", "required_seed_anchor"
-                reason = f"required_seed_role={required_seed_role}"
-            elif required_seed_role:
-                decision, action = "accept", "required_seed_main"
-                reason = f"required_seed_role={required_seed_role}"
-            else:
-                decision, action = _review_decision_for_score(
-                    final_v,
-                    paper_role,
-                    r.get("brain_score"),
-                    float(r.get("score") or 0.0),
-                )
-            f_leg.write(
-                json.dumps(
-                    {
-                        "candidate_key": key,
-                        "title": r.get("title", ""),
-                        "year": r.get("year"),
-                        "decision": decision,
-                        "paper_role": paper_role,
-                        "reason": reason,
-                        "action": action,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
+        else:
+            final_v = r["verdict"]
+            reason = r.get("reason") or f"score_papers verdict={final_v}"
+        paper_role = required_seed_role or r.get("paper_role") or CORE_METHOD
+        if required_seed_role == BACKGROUND_ANCHOR:
+            decision, action = "anchor", "required_seed_anchor"
+            reason = f"required_seed_role={required_seed_role}"
+        elif required_seed_role:
+            decision, action = "accept", "required_seed_main"
+            reason = f"required_seed_role={required_seed_role}"
+        else:
+            decision, action = _review_decision_for_score(
+                final_v,
+                paper_role,
+                r.get("brain_score"),
+                float(r.get("score") or 0.0),
             )
+        resolved_review_rows.append({
+            "candidate_key": key,
+            "title": r.get("title", ""),
+            "year": r.get("year"),
+            "decision": decision,
+            "paper_role": paper_role,
+            "confidence": r.get("brain_confidence") if r.get("brain_confidence") is not None else "",
+            "inclusion_evidence": r.get("inclusion_evidence") or [],
+            "exclusion_evidence": r.get("exclusion_evidence") or [],
+            "missing_information": r.get("missing_information") or [],
+            "reason": reason,
+            "action": action,
+        })
+    write_jsonl(review_decisions_path, resolved_review_rows)
 
     # Apply the resolution decisions: this needs a queue file — the original
     # weak_candidates_*.json from score_papers stage.
@@ -1374,30 +1663,54 @@ def stage_resolve_boundary(
         resolve_partial_path.unlink()
 
     reviewed_boundary_keys = _candidate_key_set(
-        boundary_candidates[: batches_done * batch_size]
+        reflection_candidates[: batches_done * batch_size]
     )
     brain_missing_scores = len([k for k in reviewed_boundary_keys if k not in second_scores])
     truncated = (max_batches is not None) and (
-        batches_done * batch_size < len(boundary_candidates)
+        batches_done * batch_size < len(reflection_candidates)
     )
-    uncovered_capped = max(0, len(boundary_candidates) - batches_done * batch_size) if truncated else 0
+    uncovered_capped = max(0, len(reflection_candidates) - batches_done * batch_size) if truncated else 0
+    brain_missing_explanation = (
+        f"{brain_missing_scores} boundary reflection candidates sent to second brain but not scored"
+        if brain_missing_scores
+        else ""
+    )
+    if uncovered_capped:
+        truncation_explanation = (
+            f"{uncovered_capped} boundary candidates not re-scored due to "
+            f"batch budget; they default to out_of_scope"
+        )
+    else:
+        truncation_explanation = ""
+    reflection_reason_counts: dict[str, int] = {}
+    for reasons in reflection_reasons_by_key.values():
+        for reason in reasons:
+            reflection_reason_counts[reason] = reflection_reason_counts.get(reason, 0) + 1
     state.end_stage(
         "resolve_boundary",
         status="completed",
         boundary_total=len(boundary),
         final_counts=final_counts,
+        reflection_count=len(reflection_candidates),
+        direct_resolved_count=max(0, len(boundary_candidates) - len(reflection_candidates)),
+        reflection_trigger_reasons=reflection_reason_counts,
         batches=batches_done,
         brain_errors=brain_errors,
         brain_missing_scores=brain_missing_scores,
+        brain_missing_explanation=brain_missing_explanation,
         decisions=str(decisions_path),
         review_decisions=str(review_decisions_path),
         truncated=truncated,
         truncation_reason="max_batches_reached" if truncated else None,
+        truncation_explanation=truncation_explanation,
         uncovered_capped=uncovered_capped,
     )
     return {
         "status": "completed",
         "boundary_total": len(boundary),
+        "reflection_count": len(reflection_candidates),
+        "direct_resolved_count": max(0, len(boundary_candidates) - len(reflection_candidates)),
+        "reflection_trigger_reasons": reflection_reason_counts,
         "final_counts": final_counts,
         "decisions": str(decisions_path),
         "truncated": truncated,

@@ -43,6 +43,10 @@ title_focus_patterns: []
         "decision": "accept",
         "reason": "属于方向边界内",
         "action": "accept_to_main",
+        "confidence": "high",
+        "inclusion_evidence": ["title matches task"],
+        "exclusion_evidence": [],
+        "missing_information": ["needs DOI"],
     }, ensure_ascii=False) + "\n", encoding="utf-8")
     return workspace, queue_path, decisions_path
 
@@ -100,6 +104,11 @@ def test_review_decisions_can_be_validated_and_applied(tmp_path) -> None:
     assert applied[-1]["queue_hash"] == validation["queue_hash"]
     assert applied[-1]["decision_context_hash"] == workspace_decision_context_hash(workspace)
     assert applied[-1]["scoring_policy"] == "papercompass.review_policy.v1"
+    assert applied[-1]["confidence"] == "high"
+    assert applied[-1]["inclusion_evidence"] == ["title matches task"]
+    assert applied[-1]["missing_information"] == ["needs DOI"]
+    assert papers[0]["review_decision"]["confidence"] == "high"
+    assert papers[0]["review_decision"]["inclusion_evidence"] == ["title matches task"]
     evidence = papers[0]["topic_relevance_evidence"]
     assert evidence["review_decision"] == "accept"
     assert evidence["queue_hash"] == validation["queue_hash"]

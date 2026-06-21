@@ -1,7 +1,18 @@
 import json
 
+import pytest
+
 from papercompass.cli import main
 from papercompass.config import init_workspace
+
+
+def run_confirmed(capsys, argv: list[str]) -> dict:
+    main([*argv, "--prepare"])
+    prepared = json.loads(capsys.readouterr().out)
+    assert prepared["status"] == "confirmation_required"
+    assert prepared["confirmation_token"].startswith("pcfm_")
+    main([*argv, "--confirmed-token", prepared["confirmation_token"]])
+    return json.loads(capsys.readouterr().out)
 
 
 def test_init_workspace_uses_compact_state_layout(tmp_path) -> None:
@@ -43,7 +54,7 @@ def test_init_workspace_uses_compact_state_layout(tmp_path) -> None:
 def test_override_add_records_manual_patch(tmp_path, capsys) -> None:
     workspace = tmp_path / "topic"
     init_workspace(workspace, "topic")
-    main([
+    captured = run_confirmed(capsys, [
         "override",
         "add",
         "--workspace",
@@ -60,7 +71,6 @@ def test_override_add_records_manual_patch(tmp_path, capsys) -> None:
         "author_corrected",
     ])
     assert (workspace / "overrides").is_dir()
-    captured = json.loads(capsys.readouterr().out)
     out_path = workspace / "overrides" / "manual.jsonl"
     assert captured["output"] == str(out_path)
     rows = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()]
@@ -73,10 +83,34 @@ def test_override_add_records_manual_patch(tmp_path, capsys) -> None:
     }]
 
 
+def test_mutating_cli_requires_confirmed_token(tmp_path, capsys) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+
+    with pytest.raises(SystemExit) as exc:
+        main([
+            "override",
+            "add",
+            "--workspace",
+            str(workspace),
+            "--title",
+            "A Paper",
+            "--year",
+            "2024",
+        ])
+
+    assert exc.value.code == 1
+    captured = json.loads(capsys.readouterr().out)
+    assert captured["status"] == "error"
+    assert captured["error_code"] == "confirmation_required"
+    assert "--confirmed-token" in captured["error"]
+    assert not (workspace / "overrides").exists()
+
+
 def test_add_paper_creates_manual_raw_on_demand(tmp_path, capsys) -> None:
     workspace = tmp_path / "topic"
     init_workspace(workspace, "topic")
-    main([
+    captured = run_confirmed(capsys, [
         "add-paper",
         "--workspace",
         str(workspace),
@@ -89,7 +123,6 @@ def test_add_paper_creates_manual_raw_on_demand(tmp_path, capsys) -> None:
         "--tag",
         "task:gec",
     ])
-    captured = json.loads(capsys.readouterr().out)
     out_path = workspace / ".raw" / "manual"
     assert out_path.is_dir()
     row = json.loads(next(out_path.glob("*.jsonl")).read_text(encoding="utf-8").strip())
@@ -105,7 +138,7 @@ def test_agent_search_record_creates_empty_raw_trace(tmp_path, capsys) -> None:
 
     assert not (workspace / ".raw" / "agent_search").exists()
 
-    main([
+    captured = run_confirmed(capsys, [
         "agent-search",
         "record",
         "--workspace",
@@ -117,7 +150,6 @@ def test_agent_search_record_creates_empty_raw_trace(tmp_path, capsys) -> None:
         "--note",
         "本轮查漏无新增候选",
     ])
-    captured = json.loads(capsys.readouterr().out)
 
     out_path = workspace / ".raw" / "agent_search"
     files = list(out_path.glob("*.jsonl"))
@@ -138,7 +170,7 @@ def test_review_feedback_import_writes_agent_search_trace(tmp_path, capsys) -> N
         encoding="utf-8",
     )
 
-    main([
+    captured = run_confirmed(capsys, [
         "review-feedback",
         "import",
         "--workspace",
@@ -150,7 +182,6 @@ def test_review_feedback_import_writes_agent_search_trace(tmp_path, capsys) -> N
         "--query",
         "external review missing papers",
     ])
-    captured = json.loads(capsys.readouterr().out)
 
     out_path = workspace / captured["output"]
     row = json.loads(out_path.read_text(encoding="utf-8").strip())
@@ -165,7 +196,7 @@ def test_agent_run_log_records_decision_steps(tmp_path, capsys) -> None:
     workspace = tmp_path / "topic"
     init_workspace(workspace, "topic")
 
-    main([
+    first = run_confirmed(capsys, [
         "agent-run",
         "log",
         "--workspace",
@@ -180,9 +211,8 @@ def test_agent_run_log_records_decision_steps(tmp_path, capsys) -> None:
         "--file",
         "topic.yaml",
     ])
-    first = json.loads(capsys.readouterr().out)
 
-    main([
+    second = run_confirmed(capsys, [
         "agent-run",
         "log",
         "--workspace",
@@ -196,7 +226,6 @@ def test_agent_run_log_records_decision_steps(tmp_path, capsys) -> None:
         "--file",
         "sources.yaml",
     ])
-    second = json.loads(capsys.readouterr().out)
 
     assert first["run_id"] == second["run_id"]
     steps = workspace / ".papercompass" / "logs" / "agent_build_steps.jsonl"

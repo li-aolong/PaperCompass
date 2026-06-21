@@ -1,0 +1,14 @@
+global-exclude __pycache__ *.py[cod]
+prune .papercompass
+prune .claude
+prune .pytest_cache
+prune .mypy_cache
+prune .ruff_cache
+prune .venv
+prune gpt-pro意见
+prune 方案与进度
+prune src/papercompass.egg-info
+prune logs
+prune workspaces
+prune test_artifacts
+global-exclude *.key *.pem

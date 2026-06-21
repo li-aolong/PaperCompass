@@ -8,7 +8,7 @@ from typing import Any
 
 from ..config import data_dir, manifests_dir, portable_workspace_data, state_dir, workspace_relative_path
 from ..discovery import _is_generic_topic_anchor
-from ..text import as_list, clean_text, read_json, write_json
+from ..text import as_list, atomic_write_text, clean_text, read_json, write_json
 
 
 DEFAULT_MIN_RULE_REPAIR_QUEUE = 1000
@@ -225,4 +225,4 @@ def _write_review_queue_markdown(path: Path, diagnosis: dict[str, Any]) -> None:
         *(generic_hits or ["- 无"]),
         "",
     ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")

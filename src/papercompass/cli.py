@@ -6,18 +6,32 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .auto import run_auto_build
+from .auto import ConfirmationRequired, run_auto_build
 from .auto.audit import audit_workspace
+from .auto.prefilter import run_prefilter_workspace
 from .build import add_manual_paper, build_workspace, import_records, record_agent_run_step, record_agent_search
 from .catalog import build_catalog, resolve_pointer, search_catalog
+from .confirmation import (
+    ConfirmationTokenError,
+    auto_build_confirmation_inputs,
+    cli_mutation_confirmation_inputs,
+    credential_state_for_sources,
+    prepare_confirmation,
+    update_confirmation_inputs,
+    validate_confirmation_token,
+)
 from .config import data_dir, ensure_workspace_dirs, init_workspace, load_sources_config, load_topic_config
 from .config import overrides_dir, resolve_template
 from .discovery import make_coverage_report, run_discovery
+from .doctor import doctor_archive, doctor_workspace, monitor_cost, monitor_metrics, monitor_summary, monitor_trends
 from .fulltext import fetch_fulltext
 from .plugins import BrainUnavailable, available_brains
 from .qa import build_quality_report, refresh_final_summary_from_qa
+from .sources.registry import default_source_registry
 from .sources.arxiv import sync_arxiv
-from .text import clean_text, read_json
+from .text import append_jsonl_locked, clean_text, read_json, workspace_lock
+from .text import WorkspaceLockTimeout
+from .update import UpdateConfirmationRequired, run_workspace_update
 from .web import run_server
 from .workspace_contract import (
     export_workspace,
@@ -27,6 +41,8 @@ from .workspace_contract import (
     workspace_contract_summary,
 )
 
+DISCOVERY_SOURCE_CHOICES = default_source_registry().names()
+
 
 def print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -34,6 +50,64 @@ def print_json(data: Any) -> None:
 
 def workspace_arg(value: str) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def add_confirmation_args(parser: argparse.ArgumentParser, *, command: str) -> None:
+    parser.add_argument(
+        "--prepare",
+        action="store_true",
+        help="只生成本次写入操作的确认 token，不修改 workspace",
+    )
+    parser.add_argument(
+        "--confirmed-token",
+        default=None,
+        help="用户确认后传入的 confirmation token；正式写入操作必填。",
+    )
+    parser.set_defaults(confirmation_command=command)
+
+
+def _credential_state_for_args(args: argparse.Namespace) -> dict[str, Any]:
+    sources = getattr(args, "sources", None)
+    source = clean_text(getattr(args, "source", ""))
+    if not sources and source in DISCOVERY_SOURCE_CHOICES:
+        sources = [source]
+    return credential_state_for_sources(sources)
+
+
+def handle_cli_mutation_confirmation(args: argparse.Namespace) -> bool:
+    command = clean_text(getattr(args, "confirmation_command", ""))
+    if not command:
+        return False
+    workspace = getattr(args, "workspace", None)
+    if not isinstance(workspace, Path):
+        raise ConfirmationTokenError(f"papercompass {command} 需要 --workspace 才能生成或校验 confirmation token")
+    inputs = cli_mutation_confirmation_inputs(command=command, args=vars(args))
+    if getattr(args, "prepare", False):
+        payload = prepare_confirmation(
+            workspace,
+            command=command,
+            inputs=inputs,
+            credential_state=_credential_state_for_args(args),
+        )
+        print_json({
+            "status": "confirmation_required",
+            "command": command,
+            "confirmation_token": payload["token"],
+            "expires_at": payload["expires_at"],
+            "workspace": str(workspace),
+            "inputs": inputs,
+            "credential_state": payload.get("credential_state", {}),
+            "path": payload["path"],
+        })
+        return True
+    token = clean_text(getattr(args, "confirmed_token", ""))
+    if not token:
+        raise ConfirmationTokenError(
+            f"papercompass {command} 需要有效 --confirmed-token；请先运行同一命令并加上 --prepare，"
+            "让用户确认本次写入参数后再执行。"
+        )
+    validate_confirmation_token(workspace, token, command=command, inputs=inputs)
+    return False
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -99,68 +173,73 @@ def cmd_sources_check(args: argparse.Namespace) -> None:
 
 
 def cmd_import_papers(args: argparse.Namespace) -> None:
-    result = import_records(
-        args.workspace,
-        args.input,
-        source=args.source,
-        source_type=args.source_type,
-        query=args.query or "",
-    )
+    with workspace_lock(args.workspace):
+        result = import_records(
+            args.workspace,
+            args.input,
+            source=args.source,
+            source_type=args.source_type,
+            query=args.query or "",
+        )
     print_json(result)
 
 
 def cmd_import_agent_search(args: argparse.Namespace) -> None:
-    result = import_records(
-        args.workspace,
-        args.input,
-        source=args.source,
-        source_type="agent_search",
-        query=args.query or "",
-    )
+    with workspace_lock(args.workspace):
+        result = import_records(
+            args.workspace,
+            args.input,
+            source=args.source,
+            source_type="agent_search",
+            query=args.query or "",
+        )
     print_json(result)
 
 
 def cmd_review_feedback_import(args: argparse.Namespace) -> None:
-    result = import_records(
-        args.workspace,
-        args.input,
-        source=args.source,
-        source_type="agent_search",
-        query=args.query or "external_review_feedback",
-    )
-    log = record_agent_run_step(
-        args.workspace,
-        phase="external-review-feedback",
-        status="imported",
-        summary=args.summary or f"导入外部审查新增候选：{result.get('count', 0)} 条",
-        command="papercompass review-feedback import",
-        files=[str(result.get("output", ""))],
-    )
-    result["agent_run_log"] = log
+    with workspace_lock(args.workspace):
+        result = import_records(
+            args.workspace,
+            args.input,
+            source=args.source,
+            source_type="agent_search",
+            query=args.query or "external_review_feedback",
+        )
+        log = record_agent_run_step(
+            args.workspace,
+            phase="external-review-feedback",
+            status="imported",
+            summary=args.summary or f"导入外部审查新增候选：{result.get('count', 0)} 条",
+            command="papercompass review-feedback import",
+            files=[str(result.get("output", ""))],
+        )
+        result["agent_run_log"] = log
     print_json(result)
 
 
 def cmd_agent_search_record(args: argparse.Namespace) -> None:
-    result = record_agent_search(
-        args.workspace,
-        source=args.source,
-        query=args.query or "",
-        note=args.note or "",
-    )
+    with workspace_lock(args.workspace):
+        result = record_agent_search(
+            args.workspace,
+            source=args.source,
+            query=args.query or "",
+            note=args.note or "",
+        )
     print_json(result)
 
 
 def cmd_agent_run_log(args: argparse.Namespace) -> None:
-    result = record_agent_run_step(
-        args.workspace,
-        phase=args.phase,
-        status=args.status,
-        summary=args.summary or "",
-        command=args.command or "",
-        files=args.file or [],
-        run_id=args.run_id or "",
-        new_run=args.new_run,
-    )
+    with workspace_lock(args.workspace):
+        result = record_agent_run_step(
+            args.workspace,
+            phase=args.phase,
+            status=args.status,
+            summary=args.summary or "",
+            command=args.command or "",
+            files=args.file or [],
+            run_id=args.run_id or "",
+            new_run=args.new_run,
+        )
     print_json(result)
 
 
@@ -181,13 +260,15 @@ def cmd_add_paper(args: argparse.Namespace) -> None:
             value = clean_text(value)
             if key and value:
                 raw[key] = value
-    print_json(add_manual_paper(args.workspace, raw, source=args.source))
+    with workspace_lock(args.workspace):
+        print_json(add_manual_paper(args.workspace, raw, source=args.source))
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
     if args.source != "arxiv":
         raise SystemExit(f"当前只实现 arxiv sync：{args.source}")
-    print_json(sync_arxiv(args.workspace, source_name=args.source))
+    with workspace_lock(args.workspace):
+        print_json(sync_arxiv(args.workspace, source_name=args.source))
 
 
 def cmd_discover(args: argparse.Namespace) -> None:
@@ -205,10 +286,62 @@ def cmd_discover(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_update(args: argparse.Namespace) -> None:
+    inputs = update_confirmation_inputs(
+        workspace=args.workspace,
+        sources=args.sources,
+        min_year=args.min_year,
+        max_year=args.max_year,
+        paperlists_venues=args.paperlists_venues,
+        refresh=args.refresh,
+        refresh_coverage=args.refresh_coverage,
+        timeout=args.timeout,
+        max_remote_calls=args.max_remote_calls,
+        mode=args.mode,
+    )
+    if args.prepare:
+        payload = prepare_confirmation(
+            args.workspace,
+            command="update",
+            inputs=inputs,
+            credential_state=credential_state_for_sources(args.sources),
+        )
+        print_json({
+            "status": "confirmation_required",
+            "command": "update",
+            "confirmation_token": payload["token"],
+            "expires_at": payload["expires_at"],
+            "workspace": str(args.workspace),
+            "inputs": inputs,
+            "credential_state": payload.get("credential_state", {}),
+            "path": payload["path"],
+        })
+        return
+    print_json(run_workspace_update(
+        args.workspace,
+        sources=args.sources,
+        min_year=args.min_year,
+        max_year=args.max_year,
+        paperlists_venues=args.paperlists_venues,
+        refresh=args.refresh,
+        refresh_coverage=args.refresh_coverage,
+        timeout=args.timeout,
+        max_remote_calls=args.max_remote_calls,
+        user_confirmed=args.user_confirmed,
+        confirmed_token=args.confirmed_token,
+        mode=args.mode,
+    ))
+
+
 def cmd_build(args: argparse.Namespace) -> None:
     result = build_workspace(args.workspace)
     result["coverage_report"] = make_coverage_report(args.workspace)
     print_json(result)
+
+
+def cmd_prefilter(args: argparse.Namespace) -> None:
+    with workspace_lock(args.workspace):
+        print_json(run_prefilter_workspace(args.workspace))
 
 
 def cmd_catalog_build(args: argparse.Namespace) -> None:
@@ -216,38 +349,38 @@ def cmd_catalog_build(args: argparse.Namespace) -> None:
 
 
 def cmd_override_add(args: argparse.Namespace) -> None:
-    ensure_workspace_dirs(args.workspace)
-    patch: dict[str, Any] = {}
-    for field in ("paper_key", "title", "doi", "arxiv_id", "semantic_scholar_id", "acl_id", "library_id"):
-        value = clean_text(getattr(args, field))
-        if value:
-            patch[field] = value
-    for field in ("authors", "year", "venue", "url", "pdf_url"):
-        value = clean_text(getattr(args, field))
-        if value:
-            patch[field] = value
-    tags = [clean_text(tag) for tag in args.system_tag if clean_text(tag)]
-    if tags:
-        patch["system_tags"] = tags
-    if args.field:
-        for item in args.field:
-            if "=" not in item:
-                raise SystemExit(f"--field 必须是 key=value 格式：{item}")
-            key, value = item.split("=", 1)
-            key = clean_text(key)
-            value = clean_text(value)
-            if key and value:
-                patch[key] = value
-    if not any(patch.get(key) for key in ("paper_key", "title", "doi", "arxiv_id", "semantic_scholar_id", "acl_id", "library_id")):
-        raise SystemExit("override 至少需要一个匹配字段：paper_key/title/doi/arxiv_id/semantic_scholar_id/acl_id/library_id")
-    if len(patch) <= 1:
-        raise SystemExit("override 需要至少一个待修正字段，例如 --authors、--url、--venue 或 --field key=value")
-    out_dir = overrides_dir(args.workspace)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / args.output
-    with out_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(patch, ensure_ascii=False, sort_keys=True) + "\n")
-    print_json({"workspace": str(args.workspace), "output": str(out_path), "override": patch})
+    with workspace_lock(args.workspace):
+        ensure_workspace_dirs(args.workspace)
+        patch: dict[str, Any] = {}
+        for field in ("paper_key", "title", "doi", "arxiv_id", "semantic_scholar_id", "acl_id", "library_id"):
+            value = clean_text(getattr(args, field))
+            if value:
+                patch[field] = value
+        for field in ("authors", "year", "venue", "url", "pdf_url"):
+            value = clean_text(getattr(args, field))
+            if value:
+                patch[field] = value
+        tags = [clean_text(tag) for tag in args.system_tag if clean_text(tag)]
+        if tags:
+            patch["system_tags"] = tags
+        if args.field:
+            for item in args.field:
+                if "=" not in item:
+                    raise SystemExit(f"--field 必须是 key=value 格式：{item}")
+                key, value = item.split("=", 1)
+                key = clean_text(key)
+                value = clean_text(value)
+                if key and value:
+                    patch[key] = value
+        if not any(patch.get(key) for key in ("paper_key", "title", "doi", "arxiv_id", "semantic_scholar_id", "acl_id", "library_id")):
+            raise SystemExit("override 至少需要一个匹配字段：paper_key/title/doi/arxiv_id/semantic_scholar_id/acl_id/library_id")
+        if len(patch) <= 1:
+            raise SystemExit("override 需要至少一个待修正字段，例如 --authors、--url、--venue 或 --field key=value")
+        out_dir = overrides_dir(args.workspace)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / args.output
+        append_jsonl_locked(out_path, [patch])
+        print_json({"workspace": str(args.workspace), "output": str(out_path), "override": patch})
 
 
 def cmd_lookup(args: argparse.Namespace) -> None:
@@ -269,15 +402,16 @@ def cmd_show(args: argparse.Namespace) -> None:
 def cmd_fulltext_fetch(args: argparse.Namespace) -> None:
     if args.pdf_only and args.html_only:
         raise SystemExit("--pdf-only 和 --html-only 不能同时使用")
-    result = fetch_fulltext(
-        args.workspace,
-        args.query,
-        force=args.force,
-        pdf_only=args.pdf_only,
-        html_only=args.html_only,
-        timeout=args.timeout,
-        download_assets=not args.no_assets,
-    )
+    with workspace_lock(args.workspace):
+        result = fetch_fulltext(
+            args.workspace,
+            args.query,
+            force=args.force,
+            pdf_only=args.pdf_only,
+            html_only=args.html_only,
+            timeout=args.timeout,
+            download_assets=not args.no_assets,
+        )
     print_json(result)
 
 
@@ -299,9 +433,14 @@ def cmd_stats(args: argparse.Namespace) -> None:
 
 
 def cmd_qa_workspace(args: argparse.Namespace) -> None:
-    result = build_quality_report(args.workspace, strict=args.strict)
-    if args.refresh_summary:
-        result["summary_refresh"] = refresh_final_summary_from_qa(args.workspace, result)
+    with workspace_lock(args.workspace):
+        result = build_quality_report(
+            args.workspace,
+            strict=args.strict,
+            refresh_coverage=args.refresh_coverage,
+        )
+        if args.refresh_summary:
+            result["summary_refresh"] = refresh_final_summary_from_qa(args.workspace, result)
     print_json(result)
     if args.strict and result.get("status") != "passed":
         raise SystemExit(2)
@@ -309,6 +448,39 @@ def cmd_qa_workspace(args: argparse.Namespace) -> None:
 
 def cmd_serve(args: argparse.Namespace) -> None:
     run_server(args.workspace, host=args.host, port=args.port)
+
+
+def cmd_doctor_workspace(args: argparse.Namespace) -> None:
+    print_json(doctor_workspace(
+        args.workspace,
+        fix=args.fix,
+        prune_updates=args.prune_updates,
+        keep_success_backups=args.keep_success_backups,
+    ))
+
+
+def cmd_doctor_archive(args: argparse.Namespace) -> None:
+    print_json(doctor_archive(args.archive, strict=args.strict))
+
+
+def cmd_monitor_summary(args: argparse.Namespace) -> None:
+    print_json(monitor_summary(args.workspace))
+
+
+def cmd_monitor_metrics(args: argparse.Namespace) -> None:
+    print_json(monitor_metrics(args.workspace, limit=args.limit))
+
+
+def cmd_monitor_cost(args: argparse.Namespace) -> None:
+    print_json(monitor_cost(args.workspace))
+
+
+def cmd_monitor_trends(args: argparse.Namespace) -> None:
+    print_json(monitor_trends(
+        args.workspace,
+        limit=args.limit,
+        llm_cost_limit=args.llm_cost_limit,
+    ))
 
 
 def cmd_auto_build(args: argparse.Namespace) -> None:
@@ -336,6 +508,44 @@ def cmd_auto_build(args: argparse.Namespace) -> None:
         model_variant=args.model_variant,
     )
     workspace = workspace_resolution.workspace
+    confirmation_inputs = auto_build_confirmation_inputs(
+        workspace=workspace,
+        direction=direction,
+        min_year=workspace_resolution.min_year,
+        sources=args.sources,
+        brain=args.brain,
+        second_brain=args.second_brain,
+        max_remote_calls=args.max_remote_calls,
+        refresh=args.refresh,
+        fresh=args.fresh,
+        weak_batch_size=args.weak_batch_size,
+        weak_max_batches=args.weak_max_batches,
+        boundary_max_batches=args.boundary_max_batches,
+        topic_id=workspace_resolution.topic_id,
+        allow_no_embedding=args.allow_no_embedding,
+        seed_cap=args.seed_cap,
+        original_query=args.original_query,
+        prior_markdown=prior_markdown_text,
+    )
+    if args.prepare:
+        payload = prepare_confirmation(
+            workspace,
+            command="auto-build",
+            inputs=confirmation_inputs,
+            credential_state=credential_state_for_sources(args.sources),
+        )
+        print_json({
+            "status": "confirmation_required",
+            "command": "auto-build",
+            "confirmation_token": payload["token"],
+            "expires_at": payload["expires_at"],
+            "workspace": str(workspace),
+            "workspace_resolution": workspace_resolution.as_dict(),
+            "inputs": confirmation_inputs,
+            "credential_state": payload.get("credential_state", {}),
+            "path": payload["path"],
+        })
+        return
     try:
         result = run_auto_build(
             workspace,
@@ -356,6 +566,9 @@ def cmd_auto_build(args: argparse.Namespace) -> None:
             allow_no_embedding=args.allow_no_embedding,
             prior_markdown=prior_markdown_text,
             seed_cap=args.seed_cap,
+            user_confirmed=args.user_confirmed,
+            confirmed_token=args.confirmed_token,
+            original_query=args.original_query,
         )
     except BrainUnavailable as exc:
         raise SystemExit(f"papercompass auto-build: {exc}") from exc
@@ -503,6 +716,28 @@ def _surface_truncations_and_hints(workspace: Path, result: Any) -> None:
                     f"`export SEMANTIC_SCHOLAR_API_KEY=...` 可显著提升召回。\n"
                 )
 
+    # OpenAlex key advisory
+    if not _os.environ.get("OPENALEX_API_KEY"):
+        oa_runs_path = workspace / ".papercompass" / "logs" / "source_runs.jsonl"
+        if oa_runs_path.exists():
+            oa_failed = 0
+            try:
+                for line in oa_runs_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    row = _json.loads(line)
+                    if row.get("source") == "openalex" and row.get("status") in {"failed", "rate_limited"}:
+                        oa_failed += 1
+            except Exception:
+                oa_failed = 0
+            if oa_failed >= 1:
+                _sys.stderr.write(
+                    f"\n💡 检测到您未配置 OpenAlex API Key 且有 {oa_failed} 个请求失败。\n"
+                    f"匿名或未认证访问在建库场景中更容易遇到 403/429 或配额限制。\n"
+                    f"建议配置 `OPENALEX_API_KEY` 或 `OPENALEX_EMAIL` 后重新运行，"
+                    f"以降低召回中断风险。\n"
+                )
+
 
 def cmd_brains_list(args: argparse.Namespace) -> None:
     brains = available_brains()
@@ -609,6 +844,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_p.add_argument("--source", required=True)
     import_p.add_argument("--source-type", choices=["manual", "agent_search", "saved_search", "imported_paper"], default="imported_paper")
     import_p.add_argument("--query", default="")
+    add_confirmation_args(import_p, command="import-papers")
     import_p.set_defaults(func=cmd_import_papers)
 
     import_ss = sub.add_parser("import-saved-search", help="兼容旧命令：导入 agent 检索线索 JSON/JSONL")
@@ -616,6 +852,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_ss.add_argument("--input", type=workspace_arg, required=True)
     import_ss.add_argument("--source", required=True)
     import_ss.add_argument("--query", default="")
+    add_confirmation_args(import_ss, command="import-saved-search")
     import_ss.set_defaults(func=cmd_import_agent_search)
 
     import_agent = sub.add_parser("import-agent-search", help="导入 agent/外部检索线索 JSON/JSONL")
@@ -623,6 +860,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_agent.add_argument("--input", type=workspace_arg, required=True)
     import_agent.add_argument("--source", required=True)
     import_agent.add_argument("--query", default="")
+    add_confirmation_args(import_agent, command="import-agent-search")
     import_agent.set_defaults(func=cmd_import_agent_search)
 
     review_feedback_p = sub.add_parser("review-feedback", help="外部审查反馈回写")
@@ -633,6 +871,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_feedback_import.add_argument("--source", required=True, help="审查来源，例如 claude_opus_4_7")
     review_feedback_import.add_argument("--query", default="external_review_feedback")
     review_feedback_import.add_argument("--summary", default="")
+    add_confirmation_args(review_feedback_import, command="review-feedback import")
     review_feedback_import.set_defaults(func=cmd_review_feedback_import)
 
     agent_search_p = sub.add_parser("agent-search", help="agent 查漏记录")
@@ -642,6 +881,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_search_record.add_argument("--source", default="agent_search")
     agent_search_record.add_argument("--query", default="")
     agent_search_record.add_argument("--note", default="")
+    add_confirmation_args(agent_search_record, command="agent-search record")
     agent_search_record.set_defaults(func=cmd_agent_search_record)
 
     agent_run_p = sub.add_parser("agent-run", help="agent 端到端建库日志")
@@ -655,6 +895,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_run_log.add_argument("--file", action="append", default=[], help="本阶段新增或检查的相关文件，可重复")
     agent_run_log.add_argument("--run-id", default="", help="复用已有 agent_run_id；留空则使用当前 run 或自动创建")
     agent_run_log.add_argument("--new-run", action="store_true", help="强制创建新的 agent_run_id")
+    add_confirmation_args(agent_run_log, command="agent-run log")
     agent_run_log.set_defaults(func=cmd_agent_run_log)
 
     add_paper = sub.add_parser("add-paper", help="人工确认后追加单篇候选论文")
@@ -673,11 +914,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_paper.add_argument("--semantic-scholar-id", default="")
     add_paper.add_argument("--tag", action="append", default=[])
     add_paper.add_argument("--field", action="append", default=[], help="追加任意 key=value 字段")
+    add_confirmation_args(add_paper, command="add-paper")
     add_paper.set_defaults(func=cmd_add_paper)
 
     sync_p = sub.add_parser("sync", help="在线拉取 source")
     sync_p.add_argument("--workspace", type=workspace_arg, required=True)
     sync_p.add_argument("--source", required=True)
+    add_confirmation_args(sync_p, command="sync")
     sync_p.set_defaults(func=cmd_sync)
 
     discover_p = sub.add_parser("discover", help="按方向执行候选论文召回、缓存、日志和构建")
@@ -685,7 +928,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover_p.add_argument(
         "--sources",
         nargs="+",
-        choices=["paperlists", "openalex", "crossref", "dblp", "acl_anthology", "europepmc", "pubmed", "openreview", "semanticscholar", "arxiv", "gemini_search"],
+        choices=DISCOVERY_SOURCE_CHOICES,
         default=None,
     )
     discover_p.add_argument("--min-year", type=int, default=None)
@@ -696,16 +939,65 @@ def build_parser() -> argparse.ArgumentParser:
     discover_p.add_argument("--no-catalog", action="store_true")
     discover_p.add_argument("--timeout", type=int, default=35)
     discover_p.add_argument("--max-remote-calls", type=int, default=None, help="限制本次运行的远程 HTTP 请求次数；cache hit 不计入")
+    add_confirmation_args(discover_p, command="discover")
     discover_p.set_defaults(func=cmd_discover)
+
+    update_p = sub.add_parser("update", help="对已有 workspace 执行保守更新：discover -> build -> catalog -> QA")
+    update_p.add_argument("--workspace", type=workspace_arg, required=True)
+    update_p.add_argument(
+        "--sources",
+        nargs="+",
+        choices=DISCOVERY_SOURCE_CHOICES,
+        default=None,
+    )
+    update_p.add_argument("--min-year", type=int, default=None)
+    update_p.add_argument("--max-year", type=int, default=None)
+    update_p.add_argument("--paperlists-venues", nargs="*", default=None)
+    update_p.add_argument("--refresh", action="store_true", help="忽略 source 缓存强制重抓")
+    update_p.add_argument("--refresh-coverage", action="store_true", help="显式刷新 coverage_report.json；默认 QA 只读现有报告")
+    update_p.add_argument("--timeout", type=int, default=35)
+    update_p.add_argument("--max-remote-calls", type=int, default=None, help="限制本次运行的远程 HTTP 请求次数；cache hit 不计入")
+    update_p.add_argument(
+        "--mode",
+        choices=["delta", "full"],
+        default="delta",
+        help="delta 写 checkpoint/identity delta；full 执行保守全刷新且不沿用 identity checkpoint。",
+    )
+    update_p.add_argument(
+        "--prepare",
+        action="store_true",
+        help="只生成本次 update 的确认 token，不联网、不修改 raw/data/catalog",
+    )
+    update_p.add_argument(
+        "--confirmed-token",
+        default=None,
+        help="用户确认后传入的 confirmation token；正式 update 必填。",
+    )
+    update_p.add_argument(
+        "--user-confirmed",
+        action="store_true",
+        help=(
+            "旧兼容开关；默认不再作为正式确认。只有设置 "
+            "PAPERCOMPASS_ALLOW_LEGACY_USER_CONFIRMED=1 时才生效。"
+        ),
+    )
+    update_p.set_defaults(func=cmd_update)
 
     build_p = sub.add_parser("build", help="从 raw 离线构建统一库")
     build_p.add_argument("--workspace", type=workspace_arg, required=True)
+    add_confirmation_args(build_p, command="build")
     build_p.set_defaults(func=cmd_build)
+
+    prefilter_p = sub.add_parser("prefilter", help="对 pending candidates 运行确定性前筛")
+    prefilter_p.add_argument("--workspace", type=workspace_arg, required=True)
+    add_confirmation_args(prefilter_p, command="prefilter")
+    prefilter_p.set_defaults(func=cmd_prefilter)
 
     catalog_p = sub.add_parser("catalog", help="catalog 管理")
     catalog_sub = catalog_p.add_subparsers(dest="catalog_command", required=True)
     catalog_build = catalog_sub.add_parser("build", help="构建 LLM 检索目录")
     catalog_build.add_argument("--workspace", type=workspace_arg, required=True)
+    add_confirmation_args(catalog_build, command="catalog build")
     catalog_build.set_defaults(func=cmd_catalog_build)
 
     override_p = sub.add_parser("override", help="记录后验 metadata 修正")
@@ -727,6 +1019,7 @@ def build_parser() -> argparse.ArgumentParser:
     override_add.add_argument("--pdf-url", default="")
     override_add.add_argument("--system-tag", action="append", default=[])
     override_add.add_argument("--field", action="append", default=[], help="追加任意 key=value 字段")
+    add_confirmation_args(override_add, command="override add")
     override_add.set_defaults(func=cmd_override_add)
 
     lookup_p = sub.add_parser("lookup", help="按 ID/题名定位论文")
@@ -756,6 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_p.add_argument("--html-only", action="store_true")
     fetch_p.add_argument("--no-assets", action="store_true")
     fetch_p.add_argument("--timeout", type=int, default=45)
+    add_confirmation_args(fetch_p, command="fulltext fetch")
     fetch_p.set_defaults(func=cmd_fulltext_fetch)
 
     stats_p = sub.add_parser("stats", help="输出当前库统计")
@@ -767,8 +1061,40 @@ def build_parser() -> argparse.ArgumentParser:
     qa_workspace = qa_sub.add_parser("workspace", help="检查 workspace 是否达到可用标准")
     qa_workspace.add_argument("--workspace", type=workspace_arg, required=True)
     qa_workspace.add_argument("--strict", action="store_true", help="有 warning 也返回失败")
+    qa_workspace.add_argument("--refresh-coverage", action="store_true", help="显式刷新 coverage_report.json；默认 QA 只读取现有报告")
     qa_workspace.add_argument("--refresh-summary", action="store_true", help="用最新 QA 结果刷新 auto final_summary.json")
     qa_workspace.set_defaults(func=cmd_qa_workspace)
+
+    doctor_p = sub.add_parser("doctor", help="本地 workspace / source archive 健康检查")
+    doctor_sub = doctor_p.add_subparsers(dest="doctor_command", required=True)
+    doctor_ws = doctor_sub.add_parser("workspace", help="检查 workspace 本地文件、前筛、preflight 和 pending 状态")
+    doctor_ws.add_argument("--workspace", type=workspace_arg, required=True)
+    doctor_ws.add_argument("--fix", action="store_true", help="只移动低风险孤儿 tmp/swap/过期 token 到 .papercompass/trash")
+    doctor_ws.add_argument("--prune-updates", action="store_true", help="配合 --fix 移动成功 update run 的 backup_before 到 trash；不动 failed_artifacts")
+    doctor_ws.add_argument("--keep-success-backups", type=int, default=0, help="配合 --prune-updates 保留最近 N 个成功 update backup")
+    doctor_ws.set_defaults(func=cmd_doctor_workspace)
+    doctor_archive_p = doctor_sub.add_parser("archive", help="检查源码包是否含本地配置、cache 或疑似密钥")
+    doctor_archive_p.add_argument("archive", type=workspace_arg)
+    doctor_archive_p.add_argument("--strict", action="store_true", help="大文本跳过扫描也视为失败")
+    doctor_archive_p.set_defaults(func=cmd_doctor_archive)
+
+    monitor_p = sub.add_parser("monitor", help="读取最近 update / auto-build / metrics 摘要")
+    monitor_sub = monitor_p.add_subparsers(dest="monitor_command", required=True)
+    monitor_summary_p = monitor_sub.add_parser("summary", help="输出 workspace 最近运行摘要")
+    monitor_summary_p.add_argument("--workspace", type=workspace_arg, required=True)
+    monitor_summary_p.set_defaults(func=cmd_monitor_summary)
+    monitor_metrics_p = monitor_sub.add_parser("metrics", help="输出最近 run metrics 行")
+    monitor_metrics_p.add_argument("--workspace", type=workspace_arg, required=True)
+    monitor_metrics_p.add_argument("--limit", type=int, default=20)
+    monitor_metrics_p.set_defaults(func=cmd_monitor_metrics)
+    monitor_cost_p = monitor_sub.add_parser("cost", help="汇总 LLM token 与成本")
+    monitor_cost_p.add_argument("--workspace", type=workspace_arg, required=True)
+    monitor_cost_p.set_defaults(func=cmd_monitor_cost)
+    monitor_trends_p = monitor_sub.add_parser("trends", help="汇总成本、cache、prefilter、source error 趋势并输出告警")
+    monitor_trends_p.add_argument("--workspace", type=workspace_arg, required=True)
+    monitor_trends_p.add_argument("--limit", type=int, default=100)
+    monitor_trends_p.add_argument("--llm-cost-limit", type=float, default=None)
+    monitor_trends_p.set_defaults(func=cmd_monitor_trends)
 
     serve_p = sub.add_parser("serve", help="启动本地 Web UI")
     serve_p.add_argument("--workspace", type=workspace_arg, required=True)
@@ -795,7 +1121,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     auto_p = sub.add_parser(
         "auto-build",
-        help="一句话方向 → 直接构建论文库（自动驱动 brain plugin 完成方向拆解、weak review、strong 审计）",
+        help="从已确认的研究方向构建本地论文库（自动驱动主 brain 完成方向拆解、weak review、strong 审计）",
     )
     auto_p.add_argument("--workspace", type=workspace_arg, default=None, help="完整 workspace 路径；名称必须符合规范")
     auto_p.add_argument("--workspaces-root", type=workspace_arg, default=None, help="未给 --workspace 时放置自动生成库的根目录，默认 workspaces/")
@@ -803,6 +1129,11 @@ def build_parser() -> argparse.ArgumentParser:
     auto_p.add_argument("--topic-id", default=None, help="生成 workspace 名和 topic.yaml.topic_id 时使用的稳定 ID")
     auto_p.add_argument("--model-variant", default=None, help="仅在并排保留多个正式主模型结果时使用，例如 ds-v4-flash")
     auto_p.add_argument("--direction", required=True, help="研究方向描述（自然语言）")
+    auto_p.add_argument(
+        "--original-query",
+        default=None,
+        help="可选：用户在对话中输入的原始请求原话；原样写入 topic.yaml 的 original_query 以便溯源。",
+    )
     auto_p.add_argument(
         "--prior-markdown",
         default=None,
@@ -817,14 +1148,14 @@ def build_parser() -> argparse.ArgumentParser:
     auto_p.add_argument(
         "--brain",
         default=None,
-        help="指定大脑 plugin (codex|gemini|claude|opencode|deepseek)；未指定时只跟随 PAPERCOMPASS_BRAIN 或 PAPERCOMPASS_CALLER_AGENT，不自动选择",
+        help="指定大脑 plugin (openai_compatible|codex|gemini|claude|opencode|deepseek)；未指定时只跟随 PAPERCOMPASS_BRAIN 或 PAPERCOMPASS_CALLER_AGENT，不自动选择",
     )
     auto_p.add_argument(
         "--second-brain",
         default=None,
         help=(
-            "可选的二次脑（cross-model）。若给出，resolve_boundary 在边缘"
-            "样本上跑这个 brain 做二次打分，比同脑二跑更能纠偏。空 = 不跑二次。"
+            "高级可选：仅对边界样本使用另一个 brain 做二次打分。默认空值表示不跑二次，"
+            "常规单主 Agent 流程无需设置。"
             "也可用 PAPERCOMPASS_SECOND_BRAIN 环境变量指定。"
         ),
     )
@@ -859,7 +1190,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto_p.add_argument(
         "--sources",
         nargs="+",
-        choices=["paperlists", "openalex", "crossref", "dblp", "acl_anthology", "europepmc", "pubmed", "openreview", "semanticscholar", "arxiv", "gemini_search"],
+        choices=DISCOVERY_SOURCE_CHOICES,
         default=None,
     )
     auto_p.add_argument("--weak-batch-size", type=int, default=25)
@@ -879,6 +1210,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--plan-only",
         action="store_true",
         help="只跑方向拆解，落 topic.yaml + sources.yaml + 可选 source-backed anchors 后退出，便于在花真实预算前预览",
+    )
+    auto_p.add_argument(
+        "--prepare",
+        action="store_true",
+        help="只生成本次 auto-build 的确认 token，不调用 brain、不联网、不写 raw/data/catalog",
+    )
+    auto_p.add_argument(
+        "--confirmed-token",
+        default=None,
+        help="用户确认后传入的 confirmation token；正式 auto-build 必填。",
+    )
+    auto_p.add_argument(
+        "--user-confirmed",
+        action="store_true",
+        help=(
+            "旧兼容开关；默认不再作为正式确认。只有设置 "
+            "PAPERCOMPASS_ALLOW_LEGACY_USER_CONFIRMED=1 时才生效。"
+        ),
     )
     auto_p.add_argument(
         "-v",
@@ -929,7 +1278,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if handle_cli_mutation_confirmation(args):
+            return
         args.func(args)
+    except (ConfirmationRequired, UpdateConfirmationRequired, ConfirmationTokenError) as exc:
+        print_json({"status": "error", "error_code": "confirmation_required", "error": str(exc)})
+        raise SystemExit(1) from exc
+    except WorkspaceLockTimeout as exc:
+        print_json({"status": "error", "error_code": "workspace_lock_timeout", "error": str(exc)})
+        raise SystemExit(1) from exc
     except Exception as exc:  # noqa: BLE001
         print_json({"status": "error", "error": str(exc)})
         raise SystemExit(1) from exc

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import portable_workspace_data, state_dir
+from ..text import append_jsonl_locked, write_json
 
 
 def auto_dir(workspace: Path) -> Path:
@@ -46,14 +47,7 @@ class AutoState:
             return {"created_at": now_iso(), "stages": {}, "events": []}
 
     def save(self) -> None:
-        self.path.write_text(
-            json.dumps(
-                portable_workspace_data(self.workspace, self.data),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        write_json(self.path, portable_workspace_data(self.workspace, self.data))
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
@@ -134,5 +128,4 @@ def log_brain_call(
     }
     if extra:
         entry.update(extra)
-    with iteration_log_path(workspace).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    append_jsonl_locked(iteration_log_path(workspace), [entry])

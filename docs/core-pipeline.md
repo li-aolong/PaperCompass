@@ -10,6 +10,7 @@
 uv run --no-sync papercompass auto-build \
   --direction "<research direction>" \
   --min-year 2022 \
+  --confirmed-token pcfm_xxx \
   -v
 ```
 
@@ -19,8 +20,9 @@ uv run --no-sync papercompass auto-build \
 - `build`：从全部 `.raw/` 和 overrides 重新生成统一库。
 - `catalog build`：生成给 LLM 和 Web UI 使用的检索目录。
 - `qa workspace`：检查最终 workspace 是否满足交付条件。
+- `update`：对已有 workspace 做 checkpointed full rebuild with identity delta，加 backup-restore 事务边界，串联 discover、build、catalog 和 QA，并写入 update summary、commit audit 与 checkpoints。
 
-如果是对话式 Agent 收到用户第一次建库请求，必须先读 [AGENT_ENTRY.md](../AGENT_ENTRY.md)：不要直接运行 `auto-build`，先补齐研究方向、年份和收录/排除边界，并等待用户明确确认。
+如果是对话式 Agent 收到用户第一次建库请求，必须先读 [AGENT_ENTRY.md](../AGENT_ENTRY.md)：不要直接运行正式 `auto-build`，先补齐研究方向、年份和收录/排除边界，运行 `--prepare` 生成 confirmation token，并等待用户明确确认。正式构建必须传 `--confirmed-token`；`--plan-only` 预览可不传。
 
 ## 数据流
 
@@ -46,6 +48,9 @@ uv run --no-sync papercompass auto-build \
 - `data/`、`catalog/` 和 manifests 是可重建产物，不直接手工修。
 - 所有开放式 Web / LLM / Codex / Exa / Gemini 查漏结果都必须通过 `import-agent-search` 或 `agent-search record` 落盘；不能只写在聊天记录或 Markdown 报告里。
 - 写入 workspace 的长期产物使用相对路径，避免绑定某台机器的绝对路径。
+- `auto-build`、`discover`、`build`、`catalog build`、`update`、`import-*`、`add-paper`、`override add`、`sync`、`fulltext fetch` 和 review apply 等写入口共享 workspace 级互斥锁；关键 JSON/YAML/JSONL 产物使用原子写或锁定追加。
+- 面向 Agent 的正式写入命令使用代码级确认门：先 `--prepare` 生成 token，用户确认参数后再 `--confirmed-token` 执行。`auto-build` 和 `update` 有专用输入契约，低层写入命令复用同一 confirmation token 机制。
+- Confirmation token 的边界是防止单步误跑、参数漂移、旧 token 重放和 `--fresh` 偷加；它不等价于恶意调用者不可绕过的人类认证机制。
 
 ## 阶段说明
 
@@ -79,6 +84,8 @@ brain 不能凭记忆把论文直接塞进库。关键 seed / anchor 必须来�
 
 每次 source 请求都应留下 cache、source run log、raw 输出和 coverage 状态。cache 命中不等于完整，完整性看 `.papercompass/manifests/source_coverage.json`。
 
+source 名单由 `sources.registry` 统一登记，CLI 和 discovery 都从 registry 校验 source 名称；未知 source 会在联网前失败。Discovery 按用户或配置给出的 source 顺序执行，并把 `preflight()` 结果写入 `.papercompass/manifests/source_preflight_latest.json` 供 QA 展示。所有内置 discovery source 都通过 SourcePlugin 适配器接入 registry；协议包含 `plan_queries/fetch/normalize/run`。arXiv、OpenAlex 和 Semantic Scholar 已进入结构化 `plan_queries -> fetch -> normalize` runner 主路径，并写 source/query coverage 与 checkpoint_updates；其他 source 当前保留稳定 sync 兼容层，后续按 Crossref/DBLP/Paperlists -> 领域源 -> Gemini Search 继续拆分。
+
 ### 4. 构建统一库
 
 `build` 从全部 `.raw/**/*.jsonl` 重新生成库。它负责：
@@ -94,7 +101,7 @@ brain 不能凭记忆把论文直接塞进库。关键 seed / anchor 必须来�
 
 ### 5. 评分与边界复核
 
-正式 `auto-build` 会用 embedding、brain 和 metadata 三通道融合评分，把不确定候选推入边界复核。`sentence-transformers` 是正式交付层默认必需依赖：缺失时可以继续产出诊断，但最终状态会降级，不会标记为 `passed_authoritative`。
+正式 `auto-build` 会先运行 BM25 deterministic prefilter，为候选写入 `data/prefilter_decisions.jsonl`，其中包含 action、score、topic hits、negative hits、features 和 `sent_to_llm`。`reject/hard_reject` 不进入 brain 批次；`strong` 不自动收录，只按分数分层抽样审计或保留为待复核；`review/protected` 进入 LLM 队列。prefilter 把正向词拆为 exact phrases、非泛词 soft tokens 和 generic tokens：exact phrases 用于强 phrase signal，soft tokens 只提供受控召回，generic tokens 不产生 phrase hit。独立 `papercompass prefilter` 只运行这层确定性分流；普通 `build` 仍只负责 normalize/dedupe，不调用 prefilter 或 LLM。随后系统用 embedding、brain 和 metadata 三通道融合评分；boundary 候选只有在低置信、证据冲突、prefilter/brain 冲突或中等 first-brain 信号时才进入反证式 reflection，其余候选直接用 first brain + metadata 收口。`sentence-transformers` 是正式交付层默认必需依赖：缺失时可以继续产出诊断，但最终状态会降级，不会标记为 `passed_authoritative`。
 
 边界复核的目标不是无限扩大主库，而是让默认 LLM 检索只看到高置信核心论文；背景、survey、历史源头或边界负例应进入 anchor 或 rejected，而不是混进主库。
 
@@ -112,7 +119,28 @@ brain 不能凭记忆把论文直接塞进库。关键 seed / anchor 必须来�
 
 ### 7. 增量更新
 
-增量更新不覆盖历史证据。新增 source、query、审查反馈或手工确认论文时，追加新的 `.raw/` 候选或写 overrides，然后重新运行 `build`、`catalog build` 和 `qa workspace`。如果使用 `auto-build`，同一 workspace 默认按状态恢复。
+增量更新不覆盖历史证据。新增 source、query、审查反馈或手工确认论文时，追加新的 `.raw/` 候选或写 overrides，然后运行：
+
+```bash
+uv run --no-sync papercompass update \
+  --workspace <workspace> \
+  --min-year <confirmed_min_year> \
+  --confirmed-token pcfm_xxx
+```
+
+`update` 默认是 staged checkpointed full rebuild with identity delta：它在 workspace 级锁内校验 confirmation token，然后复制必要输入到 `.papercompass/updates/update_<id>/staged_workspace/`，在 staged workspace 内执行程序化召回、离线 build、catalog swap 和 QA，并把本次结果写入 `.papercompass/updates/update_<id>/summary.json`、`commit.json` 与 `.papercompass/updates/latest.json`。运行前仍会保存 `.raw/data/catalog` 的 backup，用于发布失败时恢复；QA 未失败时才发布 staged `.raw/data/catalog`、提交 `.papercompass/checkpoints/discovery.json` 与 `.papercompass/checkpoints/identity_index.jsonl`，并清理成功运行的 `backup_before/` 与 staged workspace；QA failed 时不发布 staged 产物，主 workspace 的 `.raw/data/catalog` 保持运行前状态。`commit.json` 明确记录 `rollback_scope` 和保留的 audit artifacts。discovery checkpoint 按 source/query 粒度记录，catalog 当前仍全量重建，identity delta 用于持续追踪新增/变化。正式 update 同样需要 `--prepare` -> `--confirmed-token`。
+
+每次 discover/update/auto-build 会追加 `.papercompass/metrics/runs.jsonl`。常规健康检查使用：
+
+```bash
+uv run --no-sync papercompass doctor workspace --workspace <workspace>
+uv run --no-sync papercompass doctor workspace --workspace <workspace> --fix
+uv run --no-sync papercompass doctor workspace --workspace <workspace> --fix --prune-updates
+uv run --no-sync papercompass monitor summary --workspace <workspace>
+uv run --no-sync papercompass monitor metrics --workspace <workspace>
+uv run --no-sync papercompass monitor cost --workspace <workspace>
+uv run --no-sync papercompass monitor trends --workspace <workspace> --llm-cost-limit <usd_limit>
+```
 
 ## 常见分工
 

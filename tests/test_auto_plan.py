@@ -78,6 +78,18 @@ def test_render_plan_writes_v3_topic_yaml():
         assert removed_field not in topic, f"{removed_field} must not appear in v3 topic.yaml"
 
 
+def test_render_plan_persists_original_query_verbatim():
+    original = "帮我调研一下 2023 年之后的 speculative decoding，排除 CPU 分支预测。"
+    topic, _, _ = render_plan(
+        _sample_plan(),
+        "Speculative decoding after 2023",
+        original_query=original,
+    )
+
+    assert topic["direction_raw"] == "Speculative decoding after 2023"
+    assert topic["original_query"] == original
+
+
 def test_render_plan_infers_publication_scope_from_direction():
     topic, _, _ = render_plan(
         _sample_plan(),

@@ -16,7 +16,6 @@ coverage, defer ratio, weak triage thresholds).
 
 from __future__ import annotations
 
-import json
 import random
 from pathlib import Path
 from typing import Any
@@ -24,7 +23,7 @@ from typing import Any
 from ..anchors import existing_anchors_plan_path, iter_anchor_rows
 from ..config import data_dir, load_topic_config
 from ..plugins import BrainPlugin
-from ..text import normalize_title, read_json
+from ..text import normalize_title, read_json, write_json
 from ..normalize import identity_keys
 from .prompts import render_candidate_block
 from .state import log_brain_call
@@ -257,9 +256,5 @@ def audit_workspace(
     if brain is not None:
         precision = precision_sample(workspace, brain=brain, sample_size=sample_size)
     out_path = workspace / ".papercompass" / "auto" / "audit_recall_precision.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps({"recall": recall, "precision": precision}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_json(out_path, {"recall": recall, "precision": precision})
     return {"recall": recall, "precision": precision, "report": str(out_path)}

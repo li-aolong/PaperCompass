@@ -301,8 +301,11 @@ library with adjacent work.
 Candidates ({batch_size}):
 {candidate_block}
 
-For each: candidate_key (echo back), score (integer 0-100),
-paper_role, reason (≤25 words).
+For each: candidate_key (echo back), score (integer 0-100), paper_role,
+confidence (number 0.0-1.0), inclusion_evidence (0-3 short strings),
+exclusion_evidence (0-3 short strings), missing_information (0-3 short strings),
+reason (≤25 words). Evidence should quote compact facts from title/abstract/
+venue/source signals, not generic restatements.
 Return JSON only.
 """
 
@@ -327,6 +330,26 @@ def brain_score_schema() -> dict:
                                 "boundary_negative",
                                 "out_of_scope",
                             ],
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                        "inclusion_evidence": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 3,
+                        },
+                        "exclusion_evidence": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 3,
+                        },
+                        "missing_information": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 3,
                         },
                         "reason": {"type": "string"},
                     },

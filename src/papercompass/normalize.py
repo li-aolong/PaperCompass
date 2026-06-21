@@ -314,8 +314,42 @@ def identity_keys(paper: dict[str, Any]) -> list[str]:
     year = parse_year(paper.get("year"))
     if title:
         keys.append(f"title:{title}:{year or ''}")
-        keys.append(f"title:{title}")
     return keys
+
+
+def _decision_priority(decision: dict[str, Any]) -> int:
+    reason = clean_text(decision.get("reason")).lower()
+    confidence = clean_text(decision.get("confidence")).lower()
+    included = bool(decision.get("included"))
+    if reason == "required_seed" or confidence == "trusted_required_seed":
+        return 90
+    if confidence == "trusted" or reason == "trusted_import":
+        return 80
+    if confidence in {"out_of_scope", "rejected"} or reason.startswith("arxiv_main_cat:"):
+        return 70
+    if reason in {"before_min_year", "publication_scope_violation", "negative_role_excluded"}:
+        return 70
+    if included:
+        return 60
+    if reason == "pending_fusion_score" or decision.get("needs_review"):
+        return 20
+    return 30
+
+
+def _merge_decision(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    if not existing:
+        return dict(incoming)
+    if not incoming:
+        return dict(existing)
+    if _decision_priority(incoming) > _decision_priority(existing):
+        winner, loser = incoming, existing
+    else:
+        winner, loser = existing, incoming
+    base = dict(loser)
+    base.update({k: v for k, v in winner.items() if v not in (None, "", [], {})})
+    if base.get("included"):
+        base.pop("needs_review", None)
+    return base
 
 
 def merge_paper(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -328,10 +362,12 @@ def merge_paper(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str,
         elif key == "source_records":
             merged.setdefault(key, [])
             merged[key].extend(value or [])
-        elif key in {"ids", "urls", "topic_signals", "decision"} and isinstance(value, dict):
+        elif key in {"ids", "urls", "topic_signals"} and isinstance(value, dict):
             base = dict(merged.get(key) or {})
             base.update({k: v for k, v in value.items() if v not in (None, "", [], {})})
             merged[key] = base
+        elif key == "decision" and isinstance(value, dict):
+            merged[key] = _merge_decision(merged.get(key) or {}, value)
         elif key == "paper_role":
             if merged.get(key) in (None, "", CORE_METHOD):
                 merged[key] = normalize_role(value, default=CORE_METHOD)

@@ -7,12 +7,11 @@ workspaces and tests.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from .config import state_dir
-from .text import iter_jsonl
+from .text import iter_jsonl, write_jsonl
 
 
 ANCHORS_FILENAME = "anchors.jsonl"
@@ -42,10 +41,8 @@ def iter_anchor_rows(workspace: Path) -> list[dict[str, Any]]:
 
 
 def write_anchor_rows(workspace: Path, anchors: list[dict[str, Any]]) -> tuple[Path, Path]:
-    text = "\n".join(json.dumps(row, ensure_ascii=False) for row in anchors) + ("\n" if anchors else "")
     canonical = anchors_plan_path(workspace)
     legacy = legacy_seeds_plan_path(workspace)
-    canonical.parent.mkdir(parents=True, exist_ok=True)
-    canonical.write_text(text, encoding="utf-8")
-    legacy.write_text(text, encoding="utf-8")
+    write_jsonl(canonical, anchors)
+    write_jsonl(legacy, anchors)
     return canonical, legacy

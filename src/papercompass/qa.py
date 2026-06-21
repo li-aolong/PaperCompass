@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,17 @@ from .roles import (
     seed_verified_source_backed,
 )
 from .scope import publication_scope_report
-from .text import clean_text, is_derived_tag, iter_jsonl, normalize_title, read_json, write_json, write_jsonl
+from .text import (
+    atomic_write_text,
+    clean_text,
+    is_derived_tag,
+    iter_jsonl,
+    normalize_title,
+    read_json,
+    workspace_lock,
+    write_json,
+    write_jsonl,
+)
 
 
 def now_iso() -> str:
@@ -261,7 +272,8 @@ def score_decisions_report(workspace: Path) -> dict[str, Any]:
         verdict_counts[verdict or "unknown"] += 1
         if row.get("brain_score") is None:
             no_brain_count += 1
-            if verdict in {"in_scope", "boundary"}:
+            prefilter_action = clean_text(row.get("prefilter_action"))
+            if verdict in {"in_scope", "boundary"} and prefilter_action not in {"reject", "hard_reject", "strong"}:
                 violation_count += 1
                 if len(violations) < 30:
                     violations.append({
@@ -282,6 +294,69 @@ def score_decisions_report(workspace: Path) -> dict[str, Any]:
         "no_brain_count": no_brain_count,
         "no_brain_verdict_violation_count": violation_count,
         "no_brain_verdict_violation_examples": violations,
+    }
+
+
+def prefilter_efficiency_report(workspace: Path) -> dict[str, Any]:
+    path = data_dir(workspace) / "prefilter_decisions.jsonl"
+    if not path.exists():
+        return {"status": "missing", "path": workspace_relative_path(workspace, path)}
+    rows = [row for row in iter_jsonl(path) if isinstance(row, dict)]
+    actions = Counter(clean_text(row.get("action")) or "unknown" for row in rows)
+    reasons = Counter(
+        clean_text(reason)
+        for row in rows
+        for reason in (row.get("reasons") or [])
+        if clean_text(reason)
+    )
+    sent_to_llm = sum(1 for row in rows if bool(row.get("sent_to_llm")))
+    rejected = actions.get("reject", 0) + actions.get("hard_reject", 0)
+    return {
+        "status": "checked",
+        "path": workspace_relative_path(workspace, path),
+        "candidate_count": len(rows),
+        "action_counts": dict(actions),
+        "sent_to_llm": sent_to_llm,
+        "llm_review_ratio": round(sent_to_llm / len(rows), 3) if rows else 0.0,
+        "deterministic_reject_count": rejected,
+        "top_reject_reasons": dict(reasons.most_common(10)),
+    }
+
+
+def source_preflight_report(workspace: Path) -> dict[str, Any]:
+    latest = manifests_dir(workspace) / "source_preflight_latest.json"
+    payload = read_json(latest, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    rows = payload.get("preflight") if isinstance(payload.get("preflight"), list) else []
+    if not rows:
+        return {
+            "status": "missing",
+            "path": workspace_relative_path(workspace, latest),
+            "source_count": 0,
+            "warning_count": 0,
+            "blocked_count": 0,
+            "warnings": [],
+            "blocked_sources": [],
+        }
+    warning_rows = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("warnings")
+    ]
+    blocked = [
+        clean_text(row.get("source"))
+        for row in rows
+        if isinstance(row, dict) and clean_text(row.get("status")).lower() == "blocked"
+    ]
+    return {
+        "status": "checked",
+        "path": workspace_relative_path(workspace, latest),
+        "manifest": workspace_relative_path(workspace, payload.get("manifest", latest)),
+        "source_count": len(rows),
+        "warning_count": len(warning_rows),
+        "blocked_count": len(blocked),
+        "warnings": warning_rows[:20],
+        "blocked_sources": [source for source in blocked if source],
     }
 
 
@@ -525,16 +600,85 @@ def role_placement_report(
 def catalog_report(workspace: Path, paper_count: int) -> dict[str, Any]:
     manifest = read_json(catalog_dir(workspace) / "manifest.json", {})
     manifest_count = manifest.get("paper_count") if isinstance(manifest, dict) else None
+    orphan_dirs = sorted(
+        path.name
+        for path in workspace.glob(".catalog.*")
+        if path.is_dir() and (path.name.startswith(".catalog.tmp.") or path.name.startswith(".catalog.prev."))
+    )
     return {
         "manifest_exists": bool(manifest),
         "manifest_paper_count": manifest_count,
         "data_paper_count": paper_count,
         "count_matches": manifest_count == paper_count,
+        "orphan_generation_dirs": orphan_dirs[:20],
+        "orphan_generation_count": len(orphan_dirs),
     }
 
 
-def coverage_manifest_report(workspace: Path, paper_count: int) -> dict[str, Any]:
+def _record_count_for_output(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    if path.suffix == ".jsonl":
+        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+    if path.suffix == ".json":
+        data = read_json(path, None)
+        if isinstance(data, list):
+            return len(data)
+    return None
+
+
+def build_manifest_integrity_report(workspace: Path) -> dict[str, Any]:
+    manifest = read_json(manifests_dir(workspace) / "latest.json", {})
+    outputs = manifest.get("outputs") if isinstance(manifest, dict) else {}
+    if not isinstance(outputs, dict) or not outputs:
+        return {"status": "missing", "mismatch_count": 0, "mismatches": []}
+    mismatches: list[dict[str, Any]] = []
+    checked = 0
+    for name, item in outputs.items():
+        if not isinstance(item, dict):
+            continue
+        rel_path = clean_text(item.get("path"))
+        path = workspace / rel_path
+        checked += 1
+        if not path.exists():
+            mismatches.append({"output": name, "path": rel_path, "reason": "missing"})
+            continue
+        data = path.read_bytes()
+        actual = {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "records": _record_count_for_output(path),
+        }
+        for key in ("sha256", "bytes", "records"):
+            expected = item.get(key)
+            if expected is not None and actual.get(key) != expected:
+                mismatches.append({
+                    "output": name,
+                    "path": rel_path,
+                    "field": key,
+                    "expected": expected,
+                    "actual": actual.get(key),
+                })
+    return {
+        "status": "checked",
+        "checked_count": checked,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches[:20],
+    }
+
+
+def coverage_manifest_report(workspace: Path, paper_count: int, *, refresh: bool = False) -> dict[str, Any]:
     path = manifests_dir(workspace) / "coverage_report.json"
+    if not refresh:
+        current = read_json(path, {})
+        current_count = current.get("paper_count") if isinstance(current, dict) else None
+        return {
+            "refresh_status": "not_refreshed" if path.exists() else "missing",
+            "path": workspace_relative_path(workspace, path),
+            "paper_count": current_count,
+            "data_paper_count": paper_count,
+            "count_matches": current_count == paper_count if path.exists() else True,
+        }
     try:
         from .discovery import make_coverage_report
 
@@ -771,7 +915,12 @@ def _collect_queries(cfg: dict[str, Any]) -> list[str]:
     return [row for row in rows if row]
 
 
-def build_quality_report(workspace: Path, strict: bool = False) -> dict[str, Any]:
+def build_quality_report(workspace: Path, strict: bool = False, *, refresh_coverage: bool = False) -> dict[str, Any]:
+    with workspace_lock(workspace):
+        return _build_quality_report_unlocked(workspace, strict=strict, refresh_coverage=refresh_coverage)
+
+
+def _build_quality_report_unlocked(workspace: Path, strict: bool = False, *, refresh_coverage: bool = False) -> dict[str, Any]:
     topic = load_topic_config(workspace)
     papers = read_list(data_dir(workspace) / "papers.json")
     anchors = read_list(data_dir(workspace) / "anchor_papers.json")
@@ -780,12 +929,15 @@ def build_quality_report(workspace: Path, strict: bool = False) -> dict[str, Any
     review = review_report(workspace)
     applied_review_decisions = applied_review_decisions_report(workspace)
     score_decisions = score_decisions_report(workspace)
+    prefilter_efficiency = prefilter_efficiency_report(workspace)
+    source_preflight = source_preflight_report(workspace)
     raw_pollution = raw_pollution_report(workspace)
     coverage = coverage_report(workspace)
     recall_pool = recall_pool_report(workspace, papers, review)
     metadata = metadata_report(papers)
     catalog = catalog_report(workspace, len(papers))
-    coverage_manifest = coverage_manifest_report(workspace, len(papers))
+    build_integrity = build_manifest_integrity_report(workspace)
+    coverage_manifest = coverage_manifest_report(workspace, len(papers), refresh=refresh_coverage)
     seed = seed_report(workspace)
     query_coverage = query_coverage_report(workspace)
     publication_scope = publication_scope_report(papers, topic)
@@ -824,6 +976,24 @@ def build_quality_report(workspace: Path, strict: bool = False) -> dict[str, Any
         warnings.append("applied_review_decisions_invalid")
     if score_decisions.get("no_brain_verdict_violation_count", 0):
         warnings.append("no_brain_boundary_scores")
+    if pending and prefilter_efficiency.get("status") == "missing":
+        warnings.append("prefilter_decisions_missing")
+    if prefilter_efficiency.get("status") == "checked":
+        candidate_count = int(prefilter_efficiency.get("candidate_count") or 0)
+        action_counts = prefilter_efficiency.get("action_counts") or {}
+        ratio = float(prefilter_efficiency.get("llm_review_ratio") or 0.0)
+        reviewish = int(action_counts.get("review", 0) or 0) + int(action_counts.get("strong", 0) or 0)
+        hard_rejects = int(action_counts.get("hard_reject", 0) or 0)
+        if candidate_count >= 300 and ratio > 0.65:
+            warnings.append("prefilter_too_permissive")
+        if candidate_count >= 100 and reviewish < 10:
+            warnings.append("prefilter_too_strict")
+        if candidate_count >= 100 and hard_rejects / max(candidate_count, 1) > 0.8:
+            warnings.append("prefilter_hard_reject_dominates")
+    if source_preflight.get("blocked_count", 0):
+        warnings.append("source_preflight_blocked")
+    elif source_preflight.get("warning_count", 0):
+        warnings.append("source_preflight_has_warnings")
     if recall_pool.get("underpowered"):
         warnings.append("recall_pool_underpowered")
     if coverage["problem_count"]:
@@ -845,6 +1015,10 @@ def build_quality_report(workspace: Path, strict: bool = False) -> dict[str, Any
         warnings.append("source_auth_failed_optional")
     if not catalog["count_matches"]:
         critical.append("catalog_count_mismatch")
+    if catalog.get("orphan_generation_count", 0):
+        warnings.append("catalog_orphan_generation_dirs")
+    if build_integrity.get("mismatch_count", 0):
+        critical.append("build_manifest_integrity_mismatch")
     if coverage_manifest["refresh_status"] == "failed":
         warnings.append("coverage_report_refresh_failed")
     elif not coverage_manifest["count_matches"]:
@@ -886,12 +1060,15 @@ def build_quality_report(workspace: Path, strict: bool = False) -> dict[str, Any
         "score_papers": review,
         "applied_review_decisions": applied_review_decisions,
         "score_decisions": score_decisions,
+        "prefilter_efficiency": prefilter_efficiency,
+        "source_preflight": source_preflight,
         "recall_pool": recall_pool,
         "source_coverage": coverage,
         "coverage_manifest": coverage_manifest,
         "metadata": metadata,
         "role_placement": role_placement,
         "catalog": catalog,
+        "build_manifest_integrity": build_integrity,
         "seed_coverage": seed,
         "query_coverage": query_coverage,
         "publication_scope": publication_scope,
@@ -944,12 +1121,18 @@ def write_quality_markdown(path: Path, report: dict[str, Any]) -> None:
         f"{report.get('applied_review_decisions', {}).get('stale_context_count', 0)}",
         f"- no-brain boundary/in_scope 违规："
         f"{report['score_decisions'].get('no_brain_verdict_violation_count', 0)}",
+        f"- 前筛 LLM 队列：{report.get('prefilter_efficiency', {}).get('sent_to_llm', 0)}/"
+        f"{report.get('prefilter_efficiency', {}).get('candidate_count', 0)} "
+        f"(ratio={report.get('prefilter_efficiency', {}).get('llm_review_ratio', 0.0)})",
+        f"- Source preflight：warnings={report.get('source_preflight', {}).get('warning_count', 0)}, "
+        f"blocked={report.get('source_preflight', {}).get('blocked_count', 0)}",
         f"- Recall 候选池状态：{report['recall_pool'].get('status', 'unknown')}",
         f"- Recall queue/.raw/final：{report['recall_pool'].get('review_queue_count', 0)}/"
         f"{report['recall_pool'].get('raw_candidate_count', 0)}/"
         f"{report['recall_pool'].get('final_paper_count', 0)}",
         f"- Source coverage 风险项：{report['source_coverage']['problem_count']}",
         f"- Source auth 问题：{report['source_coverage'].get('auth_problem_count', 0)}",
+        f"- Build manifest integrity mismatch：{report.get('build_manifest_integrity', {}).get('mismatch_count', 0)}",
         f"- Coverage report 数量一致：{report.get('coverage_manifest', {}).get('count_matches')}",
         f"- Catalog 数量一致：{report['catalog']['count_matches']}",
         f"- Source-backed anchor：{report['seed_coverage'].get('source_backed_seed_count', 0)}",
@@ -972,7 +1155,7 @@ def write_quality_markdown(path: Path, report: dict[str, Any]) -> None:
         "详细结构化结果见同名 `quality_gates_*.json`。",
         "",
     ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def refresh_final_summary_from_qa(workspace: Path, report: dict[str, Any]) -> dict[str, Any]:

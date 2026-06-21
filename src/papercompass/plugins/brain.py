@@ -19,6 +19,12 @@ class BrainInvocationError(RuntimeError):
     pass
 
 
+class BrainTransientError(BrainInvocationError):
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclass
 class BrainResponse:
     text: str
@@ -49,6 +55,10 @@ class BrainPlugin:
     @classmethod
     def discover(cls) -> "BrainPlugin | None":
         return cls() if cls.is_available() else None
+
+    @classmethod
+    def availability_error(cls) -> str:
+        return f"requested brain '{cls.name}' is not available"
 
     def _ask_once(
         self,
@@ -102,7 +112,9 @@ class BrainPlugin:
                 if attempt < attempts - 1:
                     import time as _time
 
-                    _time.sleep(min(2.0 * (attempt + 1), 8.0))
+                    retry_after = getattr(exc, "retry_after", None)
+                    delay = retry_after if retry_after is not None else min(2.0 * (attempt + 1), 8.0)
+                    _time.sleep(max(0.0, float(delay)))
                 continue
         assert last_exc is not None
         raise last_exc
@@ -612,48 +624,106 @@ class OpenCodePlugin(BrainPlugin):
         )
 
 
-class DeepSeekAPIPlugin(BrainPlugin):
-    """Direct DeepSeek REST API client (skips opencode CLI overhead).
+class OpenAICompatibleBrain(BrainPlugin):
+    """Generic Chat Completions client.
 
-    opencode wraps an agent-mode runtime around the model: it prepends a
-    16-19k token system prompt for tool-use, which inflates per-call cost
-    and latency by 3-5×. PaperCompass only needs raw inference, not
-    agent-style tool loops, so calling DeepSeek's OpenAI-compatible
-    /chat/completions endpoint directly is far cheaper.
+    Required env:
+      PAPERCOMPASS_BRAIN_BASE_URL, PAPERCOMPASS_BRAIN_API_KEY,
+      PAPERCOMPASS_BRAIN_MODEL.
 
-    Pricing (deepseek-v4-pro / deepseek-v4-flash):
-        v4-pro:   $0.27 / M input, $1.10 / M output
-        v4-flash: $0.07 / M input, $0.28 / M output
-    The plugin records per-call usage / cost in BrainResponse.extra so
-    final_summary can sum total spend.
-
-    Auth: DEEPSEEK_API_KEY env var (already used by opencode).
-    Model select: PAPERCOMPASS_DEEPSEEK_MODEL env var or `model` class attr.
+    `base_url` may be either an API root such as `https://host/v1` or the full
+    `/chat/completions` endpoint.
     """
 
-    name = "deepseek"
-    display = "DeepSeek API (direct)"
-    model = "deepseek-v4-pro"
-
-    # USD per 1M tokens
-    _PRICING = {
-        "deepseek-v4-pro": {"input": 0.27, "output": 1.10},
-        "deepseek-v4-flash": {"input": 0.07, "output": 0.28},
-        "deepseek-chat": {"input": 0.27, "output": 1.10},
-        "deepseek-reasoner": {"input": 0.55, "output": 2.19},
-    }
+    name = "openai_compatible"
+    display = "OpenAI-compatible Chat Completions API"
+    base_url_env = "PAPERCOMPASS_BRAIN_BASE_URL"
+    api_key_env = "PAPERCOMPASS_BRAIN_API_KEY"
+    model_env = "PAPERCOMPASS_BRAIN_MODEL"
+    model_revision_env = "PAPERCOMPASS_BRAIN_MODEL_REVISION"
+    response_format_env = "PAPERCOMPASS_BRAIN_RESPONSE_FORMAT"
+    max_tokens_env = "PAPERCOMPASS_BRAIN_MAX_TOKENS"
+    input_price_env = "PAPERCOMPASS_BRAIN_INPUT_PRICE_PER_MTOK"
+    output_price_env = "PAPERCOMPASS_BRAIN_OUTPUT_PRICE_PER_MTOK"
+    default_base_url = ""
+    default_model = ""
+    user_agent = "papercompass-openai-compatible-brain/0.1"
+    _PRICING: dict[str, dict[str, float]] = {}
 
     @classmethod
     def is_available(cls) -> bool:
-        return bool(os.environ.get("DEEPSEEK_API_KEY"))
+        return bool(
+            (os.environ.get(cls.base_url_env) or cls.default_base_url)
+            and os.environ.get(cls.api_key_env)
+            and (os.environ.get(cls.model_env) or cls.default_model)
+        )
 
-    @staticmethod
-    def _cost_for(model: str, in_tokens: int, out_tokens: int) -> float:
-        p = DeepSeekAPIPlugin._PRICING.get(model)
-        if not p:
+    @classmethod
+    def availability_error(cls) -> str:
+        missing = []
+        if not (os.environ.get(cls.base_url_env) or cls.default_base_url):
+            missing.append(cls.base_url_env)
+        if not os.environ.get(cls.api_key_env):
+            missing.append(cls.api_key_env)
+        if not (os.environ.get(cls.model_env) or cls.default_model):
+            missing.append(cls.model_env)
+        return f"requested brain '{cls.name}' is unavailable; missing env: {', '.join(missing) or 'unknown'}"
+
+    @classmethod
+    def _base_url(cls) -> str:
+        return (os.environ.get(cls.base_url_env) or cls.default_base_url).rstrip("/")
+
+    @classmethod
+    def _model(cls) -> str:
+        return os.environ.get(cls.model_env, cls.default_model)
+
+    @classmethod
+    def _model_revision(cls) -> str:
+        return os.environ.get(cls.model_revision_env, "")
+
+    @classmethod
+    def _response_format_mode(cls) -> str:
+        return os.environ.get(cls.response_format_env, "json_object").strip().lower() or "json_object"
+
+    @classmethod
+    def _max_tokens(cls) -> int:
+        raw = os.environ.get(cls.max_tokens_env, "").strip()
+        if not raw:
+            return 8000
+        try:
+            value = int(raw)
+        except ValueError:
+            return 8000
+        return max(1, value)
+
+    @classmethod
+    def _chat_url(cls) -> str:
+        base = cls._base_url()
+        if base.endswith("/chat/completions"):
+            return base
+        return base.rstrip("/") + "/chat/completions"
+
+    @classmethod
+    def _cost_for(cls, model: str, in_tokens: int, out_tokens: int) -> float:
+        env_input = os.environ.get(cls.input_price_env, "").strip()
+        env_output = os.environ.get(cls.output_price_env, "").strip()
+        if env_input or env_output:
+            try:
+                input_price = float(env_input or 0.0)
+                output_price = float(env_output or 0.0)
+            except ValueError:
+                input_price = output_price = 0.0
+            return round(
+                in_tokens * input_price / 1_000_000
+                + out_tokens * output_price / 1_000_000,
+                6,
+            )
+        pricing = cls._PRICING.get(model)
+        if not pricing:
             return 0.0
         return round(
-            in_tokens * p["input"] / 1_000_000 + out_tokens * p["output"] / 1_000_000,
+            in_tokens * pricing.get("input", 0.0) / 1_000_000
+            + out_tokens * pricing.get("output", 0.0) / 1_000_000,
             6,
         )
 
@@ -668,38 +738,50 @@ class DeepSeekAPIPlugin(BrainPlugin):
         system: str | None = None,
         cwd: Path | None = None,
     ) -> BrainResponse:
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        api_key = os.environ.get(self.api_key_env)
         if not api_key:
-            raise BrainUnavailable("DEEPSEEK_API_KEY not set")
+            raise BrainUnavailable(f"{self.api_key_env} not set")
         import urllib.error
         import urllib.request
 
         full_prompt = _wrap_with_context(prompt, context_files, schema)
+        model = self._model()
+        messages = []
         if system:
-            full_prompt = f"# System\n{system}\n\n" + full_prompt
-        model = os.environ.get("PAPERCOMPASS_DEEPSEEK_MODEL", self.model)
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": full_prompt})
 
         body: dict[str, Any] = {
             "model": model,
-            "messages": [{"role": "user", "content": full_prompt}],
-            "max_tokens": 8000,
+            "messages": messages,
+            "max_tokens": self._max_tokens(),
         }
-        if schema is not None:
-            # json_object mode lets the model return any valid JSON; the
-            # <<<JSON_BEGIN>>> markers in our prompt + _extract_json on
-            # parse handle structure. (json_schema strict mode availability
-            # varies between deepseek model versions; json_object is universal.)
+        response_format_mode = self._response_format_mode()
+        if schema is not None and response_format_mode == "json_object":
             body["response_format"] = {"type": "json_object"}
+        elif schema is not None and response_format_mode == "json_schema":
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "papercompass_response",
+                    "schema": _strict_schema(schema),
+                    "strict": True,
+                },
+            }
+        elif response_format_mode not in {"none", "off", "text", ""}:
+            raise BrainInvocationError(
+                f"{self.response_format_env} must be json_object, json_schema, or none"
+            )
         if temperature is not None:
             body["temperature"] = temperature
 
         req = urllib.request.Request(
-            "https://api.deepseek.com/v1/chat/completions",
+            self._chat_url(),
             data=json.dumps(body).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "papercompass-deepseek-plugin/0.1",
+                "User-Agent": self.user_agent,
             },
             method="POST",
         )
@@ -713,23 +795,35 @@ class DeepSeekAPIPlugin(BrainPlugin):
                 err_body = exc.read().decode("utf-8")[:500]
             except Exception:
                 err_body = ""
+            if exc.code in {429, 500, 502, 503, 504}:
+                retry_after: float | None = None
+                raw_retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                if raw_retry_after:
+                    try:
+                        retry_after = min(float(raw_retry_after), 60.0)
+                    except ValueError:
+                        retry_after = None
+                raise BrainTransientError(
+                    f"{self.name} api transient HTTP {exc.code}: {err_body}",
+                    retry_after=retry_after,
+                ) from exc
             raise BrainInvocationError(
-                f"deepseek api HTTP {exc.code}: {err_body}"
+                f"{self.name} api HTTP {exc.code}: {err_body}"
             ) from exc
         except urllib.error.URLError as exc:
-            raise BrainInvocationError(f"deepseek api unreachable: {exc}") from exc
+            raise BrainTransientError(f"{self.name} api unreachable: {exc}") from exc
         except (TimeoutError, OSError) as exc:
-            raise BrainInvocationError(f"deepseek api timeout: {exc}") from exc
+            raise BrainTransientError(f"{self.name} api timeout: {exc}") from exc
 
         if isinstance(payload, dict) and payload.get("error"):
             raise BrainInvocationError(
-                f"deepseek api error: {str(payload['error'])[:300]}"
+                f"{self.name} api error: {str(payload['error'])[:300]}"
             )
 
         choices = payload.get("choices") if isinstance(payload, dict) else None
         if not choices:
             raise BrainInvocationError(
-                f"deepseek api response missing choices: {str(payload)[:200]}"
+                f"{self.name} api response missing choices: {str(payload)[:200]}"
             )
         text = (choices[0].get("message") or {}).get("content") or ""
         parsed = _extract_json(text) if schema is not None else None
@@ -749,12 +843,34 @@ class DeepSeekAPIPlugin(BrainPlugin):
             duration_seconds=duration,
             extra={
                 "model": model,
+                "model_revision": self._model_revision(),
+                "response_format": response_format_mode,
+                "max_tokens": body["max_tokens"],
                 "input_tokens": in_tokens,
                 "output_tokens": out_tokens,
                 "total_tokens": total_tokens,
                 "cost_usd": cost_usd,
             },
         )
+
+
+class DeepSeekAPIPlugin(OpenAICompatibleBrain):
+    """DeepSeek is an OpenAI-compatible preset, retained as a named alias."""
+
+    name = "deepseek"
+    display = "DeepSeek API (OpenAI-compatible preset)"
+    base_url_env = "PAPERCOMPASS_DEEPSEEK_BASE_URL"
+    api_key_env = "DEEPSEEK_API_KEY"
+    model_env = "PAPERCOMPASS_DEEPSEEK_MODEL"
+    default_base_url = "https://api.deepseek.com/v1"
+    default_model = "deepseek-v4-pro"
+    user_agent = "papercompass-deepseek-plugin/0.1"
+    _PRICING = {
+        "deepseek-v4-pro": {"input": 0.27, "output": 1.10},
+        "deepseek-v4-flash": {"input": 0.07, "output": 0.28},
+        "deepseek-chat": {"input": 0.27, "output": 1.10},
+        "deepseek-reasoner": {"input": 0.55, "output": 2.19},
+    }
 
 
 _REGISTRY: dict[str, type[BrainPlugin]] = {
@@ -764,6 +880,7 @@ _REGISTRY: dict[str, type[BrainPlugin]] = {
         CodexPlugin,
         GeminiPlugin,
         OpenCodePlugin,
+        OpenAICompatibleBrain,
         DeepSeekAPIPlugin,
     )
 }
@@ -815,7 +932,7 @@ def detect_brain(preference: str | None = None) -> BrainPlugin:
         raise BrainUnavailable(f"unknown brain plugin '{pref}' (known: {known})")
     if cls.is_available():
         return cls()
-    raise BrainUnavailable(f"requested brain '{pref}' is not available on PATH")
+    raise BrainUnavailable(cls.availability_error())
 
 
 def select_brain(*, preference: str | None = None, env_var: str = "PAPERCOMPASS_BRAIN") -> BrainPlugin:

@@ -57,8 +57,9 @@ uv run --no-sync papercompass workspace name \
 
 - `topic_id`、`name`、`description`
 - `min_year`
-- strong / weak / negative keywords 或 patterns
-- datasets、methods、aliases
+- `direction_raw`：Agent 提炼后的正式研究方向
+- `original_query`：可选，用户在对话中输入的原始请求原话，用于溯源
+- search hints、discriminator terms、judge examples、source filter terms
 - `publication_scope`
 - paper role 规则
 

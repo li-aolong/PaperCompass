@@ -35,9 +35,77 @@ from ..plugins.brain import (
     GeminiPlugin,
 )
 from ..text import clean_text
+from .registry import DiscoveryContext, SourceCapabilities, SourcePreflight, SourceQuery
 
 
 _ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5})(v\d+)?")
+
+
+class GeminiSearchSourcePlugin:
+    name = "gemini_search"
+    description = "Gemini Search assisted recall"
+    capabilities = SourceCapabilities(
+        name="gemini_search",
+        requires_auth=True,
+        supports_incremental=False,
+        supports_cursor=False,
+        supports_since=False,
+        default_rate_limit_seconds=0.0,
+    )
+
+    def preflight(self, context: DiscoveryContext) -> SourcePreflight:
+        enabled = bool(context.source_config.get("enabled", False))
+        warnings: list[str] = []
+        status = "ok" if enabled else "disabled"
+        auth_state = "cli_configured"
+        if enabled and not GeminiPlugin.is_available():
+            status = "warning"
+            auth_state = "missing_cli"
+            warnings.append("gemini_cli_missing")
+        return SourcePreflight(
+            source=self.name,
+            status=status,
+            auth_state=auth_state,
+            warnings=warnings,
+        )
+
+    def plan_queries(self, context: DiscoveryContext) -> list[SourceQuery]:
+        return []
+
+    def fetch(self, query: SourceQuery, context: DiscoveryContext) -> list[dict[str, Any]]:
+        raise NotImplementedError("gemini_search has not migrated fetch() yet")
+
+    def normalize(self, item: dict[str, Any], query: SourceQuery, context: DiscoveryContext) -> dict[str, Any]:
+        normalized = _normalize_paper_row(item)
+        return normalized or {}
+
+    def run(self, context: DiscoveryContext) -> dict[str, Any]:
+        from ..discovery import RemoteBudget, default_queries
+
+        cfg = context.source_config or {}
+        if not cfg.get("enabled", False):
+            return {
+                "source": self.name,
+                "runs": 0,
+                "seen": 0,
+                "kept": 0,
+                "errors": [{"phase": "config", "error": "discovery.gemini_search.enabled is false"}],
+                "status": "skipped_disabled",
+            }
+        queries = cfg.get("queries") or default_queries(context.topic)
+        year_window = (context.years[0], context.years[-1]) if context.years else None
+        return sync_gemini_search(
+            context.workspace,
+            context.topic,
+            year_window,
+            queries=[clean_text(q) for q in queries if clean_text(q)],
+            direction=clean_text(context.topic.get("description") or context.topic.get("name") or ""),
+            max_results_per_query=int(cfg.get("max_results_per_query", 15)),
+            max_queries=int(cfg.get("max_queries", 6)),
+            timeout=int(cfg.get("timeout", 300)),
+            refresh=context.refresh,
+            budget=context.budget or RemoteBudget(None),
+        )
 
 
 def _papers_schema(min_year: int | None) -> dict[str, Any]:

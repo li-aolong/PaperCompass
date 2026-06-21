@@ -50,6 +50,10 @@ Query 规则：
 - 修正结果时改输入或规则，不直接改 `data/papers.jsonl`。
 - 默认 LLM retrieval 只读主库；背景锚点放在 `data/anchor_papers.jsonl`。
 - 每次正式交付前运行 `catalog build` 和 `qa workspace`。
+- `discover`、`build`、`catalog build`、`add-paper`、`import-agent-search`、`review-feedback import` 和 `override add` 都是写入命令，正式执行前先用同一参数 `--prepare`，确认后再用 `--confirmed-token`。
+- Workspace/file lock 使用进程内 `RLock` 加 OS 文件锁：Unix-like 走 `fcntl`，Windows 走 `msvcrt` fallback；默认锁等待超时由 `PAPERCOMPASS_LOCK_TIMEOUT_SECONDS` 控制，CLI 会输出 `workspace_lock_timeout`。
+- `doctor workspace` 默认只做诊断；加 `--fix` 时会持有 workspace lock，只把超过安全年龄阈值的孤儿 `.tmp`、catalog swap 目录和过期 confirmation token 移动到 `.papercompass/trash/doctor_<stamp>/`，不会修 raw JSONL、manifest mismatch 或 stale review decisions 这类高风险问题。需要清理成功 update 的旧 `backup_before/` 时显式加 `--prune-updates`，不会移动 failed artifacts。
+- 发布源码包使用白名单脚本：`python scripts/make_source_zip.py PaperCompass_source.zip`，再运行 `python scripts/check_source_archive.py PaperCompass_source.zip`、`python scripts/check_source_archive.py --strict PaperCompass_source.zip` 和 `python scripts/test_source_archive.py PaperCompass_source.zip`，避免 `.claude`、cache、pycache、`.egg-info`、历史审计材料、Zip Slip 路径或疑似密钥进入 archive，并确认解压后的源码包可独立通过 pytest。源码包会包含 `scripts/` 与 `.github/`，打包脚本还会写 `PaperCompass_source.zip.manifest.json`，记录版本、git commit、文件数、sha256 和 release gate。
 
 `build` 读取：
 

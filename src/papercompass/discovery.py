@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,9 +20,12 @@ from .catalog import build_catalog
 from .config import cache_dir, data_dir, ensure_workspace_dirs, load_sources_config, load_topic_config
 from .config import logs_dir, manifests_dir, raw_dir
 from .config import portable_workspace_data, workspace_label, workspace_relative_path
+from .metrics import record_run_metric
+from .sources.registry import DiscoveryContext, default_source_registry
 from .source_budget import ensure_arxiv_budget_floor
-from .text import as_list, clean_text, normalize_title, parse_year, read_json, short_hash, slugify
+from .text import append_jsonl_locked, as_list, clean_text, normalize_title, parse_year, read_json, short_hash, slugify
 from .text import strip_derived_tags, write_json
+from .text import workspace_lock
 
 
 USER_AGENT = "papercompass/0.1 (+https://github.com/local/papercompass)"
@@ -67,11 +71,7 @@ def run_id(prefix: str) -> str:
 
 
 def append_jsonl(path: Path, rows: list[dict[str, Any]]) -> int:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    return len(rows)
+    return append_jsonl_locked(path, rows)
 
 
 def load_json_cache(path: Path) -> Any | None:
@@ -107,7 +107,9 @@ def ensure_discovery_dirs(workspace: Path) -> None:
 
 
 def year_range(topic: dict[str, Any], min_year: int | None, max_year: int | None) -> list[int]:
-    start = min_year or parse_year(topic.get("min_year")) or 2022
+    start = min_year or parse_year(topic.get("min_year"))
+    if not start:
+        raise ValueError("discover 需要显式 min_year 或 topic.yaml.min_year，不能隐式默认年份")
     end = max_year or datetime.now().year
     if start > end:
         raise ValueError(f"min_year 不能大于 max_year：{start} > {end}")
@@ -118,6 +120,21 @@ def source_config(workspace: Path) -> dict[str, Any]:
     cfg = load_sources_config(workspace)
     sources = cfg.get("sources", {})
     return cfg.get("discovery") or sources.get("discovery") or {}
+
+
+def resolve_secret(
+    cfg: dict[str, Any],
+    *,
+    value_key: str,
+    env_key: str,
+    default_env: str = "",
+) -> str:
+    direct = clean_text(cfg.get(value_key, ""))
+    if direct:
+        return direct
+    configured_env = clean_text(cfg.get(env_key, ""))
+    env_name = configured_env or clean_text(default_env)
+    return clean_text(os.getenv(env_name, "")) if env_name else ""
 
 
 def topic_terms(topic: dict[str, Any]) -> list[str]:
@@ -254,6 +271,11 @@ def http_get_json(
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             if exc.code in retry_status and attempt < attempts - 1:
+                time.sleep(backoff * (attempt + 1))
+                continue
+            raise
+        except (TimeoutError, socket.timeout, urllib.error.URLError, OSError) as exc:
+            if attempt < attempts - 1 and transient_limit_error(str(exc)):
                 time.sleep(backoff * (attempt + 1))
                 continue
             raise
@@ -854,6 +876,16 @@ def paperlists_item_to_raw(item: dict[str, Any], venue: str, year: int) -> dict[
         raw["openreview_id"] = item_id
     if item.get("dblp"):
         raw["dblp_key"] = clean_text(item.get("dblp")).lstrip(";")
+    # Extract arxiv_id from site / pdf URL to strengthen cross-source linking.
+    # A paperlists rejected-submission record may carry an arXiv link that
+    # enables dedup with the authoritative arXiv source record.
+    if not raw.get("arxiv_id"):
+        for url_key in ("site", "pdf"):
+            url_value = clean_text(item.get(url_key))
+            m = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5}(?:v\d+)?)", url_value)
+            if m:
+                raw["arxiv_id"] = re.sub(r"v\d+$", "", m.group(1))
+                break
     return {k: v for k, v in raw.items() if v not in (None, "", [], {})}
 
 
@@ -3092,7 +3124,186 @@ def make_coverage_report(workspace: Path) -> dict[str, Any]:
     return report
 
 
+def run_structured_source_plugin(plugin: Any, context: DiscoveryContext) -> dict[str, Any]:
+    source = clean_text(getattr(plugin, "name", ""))
+    if not source:
+        raise ValueError("structured source plugin missing name")
+    coverage = load_coverage(context.workspace)
+    total_seen = 0
+    total_kept = 0
+    runs = 0
+    errors: list[dict[str, Any]] = []
+    raw_segments: list[str] = []
+    checkpoint_updates: dict[str, Any] = {}
+    stop_reason = ""
+    queries = plugin.plan_queries(context)
+    for query in queries:
+        if stop_reason:
+            break
+        key = query.query_key
+        manifest = coverage.get(key, {})
+        run = run_id(f"{source}_{short_hash(key)}")
+        cache_file = cache_dir(context.workspace) / "discovery" / source / f"{slugify(key, 120)}.json"
+        cache_hit = bool(cache_file.exists() and manifest.get("status") == "success" and not context.refresh)
+        started = now_iso()
+        status = "success"
+        items: list[dict[str, Any]] = []
+        error_message = ""
+        if cache_hit:
+            cached = load_json_cache(cache_file)
+            items = cached if isinstance(cached, list) else []
+        else:
+            try:
+                fetched = plugin.fetch(query, context)
+                items = fetched if isinstance(fetched, list) else []
+                write_json(cache_file, items)
+            except Exception as exc:  # noqa: BLE001
+                error_message = str(exc)
+                status = "budget_exhausted" if budget_exhausted_error(error_message) else "failed"
+                if status == "budget_exhausted":
+                    stop_reason = error_message
+                items = []
+        raw_path, write_raw = reusable_raw_path(
+            context.workspace,
+            manifest,
+            raw_dir(context.workspace) / source / f"{slugify(query.query, 80)}_{run}.jsonl",
+            cache_hit,
+        )
+        rows: list[dict[str, Any]] = []
+        provenance: list[dict[str, Any]] = []
+        if status == "success":
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                total_seen += 1
+                raw = plugin.normalize(item, query, context)
+                if not raw.get("title") or not matches_topic(raw, context.topic):
+                    continue
+                source_item_id = clean_text(
+                    raw.get("doi")
+                    or raw.get("arxiv_id")
+                    or raw.get("openalex_id")
+                    or raw.get("semantic_scholar_id")
+                    or raw.get("url")
+                )
+                wrapper, prov = wrap_candidate(
+                    raw,
+                    source_name=source,
+                    source_type=source,
+                    query=clean_text(query.params.get("base_query")) or query.query,
+                    source_run_id=run,
+                    raw_path=raw_path.relative_to(context.workspace),
+                    topic=context.topic,
+                    source_item_id=source_item_id,
+                    source_url=clean_text(raw.get("url")),
+                )
+                rows.append(wrapper)
+                provenance.append(prov)
+            if write_raw:
+                append_jsonl(raw_path, rows)
+                record_provenance(context.workspace, provenance)
+            total_kept += len(rows)
+        else:
+            errors.append({"source": source, "query": query.query, "error": error_message})
+        complete = status == "success"
+        coverage[key] = {
+            "source": source,
+            "query": query.query,
+            "query_key": key,
+            "params": query.params,
+            "complete": complete,
+            "status": status,
+            **coverage_health(
+                status,
+                cache_hit=cache_hit,
+                source_exhausted=True if status == "success" else None,
+                budget_complete=status == "success",
+            ),
+            "cache_path": str(cache_file.relative_to(context.workspace)),
+            "result_count": len(items),
+            "kept_count": len(rows),
+            "raw_output": str(raw_path.relative_to(context.workspace)),
+            "last_run_id": run,
+            "fetched_at": now_iso(),
+            "errors": [error_message] if error_message else [],
+        }
+        checkpoint_updates[key] = {
+            "last_success_at": now_iso() if status == "success" else "",
+            "status": status,
+            "cursor": query.cursor,
+            "since": query.since,
+            "raw_output": str(raw_path.relative_to(context.workspace)),
+        }
+        raw_segments.append(str(raw_path.relative_to(context.workspace)))
+        record_source_run(context.workspace, {
+            "run_id": run,
+            "source": source,
+            "operation": "fetch",
+            "query": query.query,
+            "bucket": clean_text(query.params.get("year") or query.since or ""),
+            "params": query.params,
+            "started_at": started,
+            "finished_at": now_iso(),
+            "status": status,
+            "cache_hit": cache_hit,
+            "cache_path": str(cache_file.relative_to(context.workspace)),
+            "fetched_count": len(items),
+            "kept_count": len(rows),
+            "raw_output": str(raw_path.relative_to(context.workspace)),
+            "written_count": len(rows) if write_raw else 0,
+            "errors": [error_message] if error_message else [],
+        })
+        runs += 1
+        save_coverage(context.workspace, coverage)
+        if stop_reason:
+            break
+        sleep_seconds = float(query.params.get("sleep_seconds", 0.0) or 0.0)
+        if sleep_seconds and not cache_hit:
+            time.sleep(sleep_seconds)
+    if stop_reason:
+        errors.append({"source": source, "error": stop_reason})
+    return {
+        "source": source,
+        "runner": "structured_plan_fetch_normalize",
+        "runs": runs,
+        "seen": total_seen,
+        "kept": total_kept,
+        "raw_segments": raw_segments,
+        "checkpoint_updates": checkpoint_updates,
+        "errors": errors[:20],
+        "stopped_early": bool(stop_reason),
+        "stop_reason": stop_reason,
+    }
+
+
 def run_discovery(
+    workspace: Path,
+    sources: list[str] | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    refresh: bool = False,
+    build: bool = True,
+    catalog: bool = True,
+    paperlists_venues: list[str] | None = None,
+    timeout: int = 35,
+    max_remote_calls: int | None = None,
+) -> dict[str, Any]:
+    with workspace_lock(workspace):
+        return _run_discovery_unlocked(
+            workspace,
+            sources=sources,
+            min_year=min_year,
+            max_year=max_year,
+            refresh=refresh,
+            build=build,
+            catalog=catalog,
+            paperlists_venues=paperlists_venues,
+            timeout=timeout,
+            max_remote_calls=max_remote_calls,
+        )
+
+
+def _run_discovery_unlocked(
     workspace: Path,
     sources: list[str] | None = None,
     min_year: int | None = None,
@@ -3109,9 +3320,15 @@ def run_discovery(
     cfg = source_config(workspace)
     years = year_range(topic, min_year, max_year)
     selected = sources or cfg.get("sources") or default_discovery_sources(topic, cfg)
-    selected = [clean_text(source).lower() for source in selected if clean_text(source)]
+    selected = list(dict.fromkeys(clean_text(source).lower() for source in selected if clean_text(source)))
+    source_registry = default_source_registry()
+    unknown_sources = source_registry.unknown(selected)
+    if unknown_sources:
+        raise ValueError(f"unknown discovery source(s): {', '.join(unknown_sources)}")
     results: list[dict[str, Any]] = []
+    preflight_rows: list[dict[str, Any]] = []
     started = now_iso()
+    manifest_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     configured_budget = max_remote_calls if max_remote_calls is not None else cfg.get("max_remote_calls")
     total_remote_limit = _positive_int(configured_budget)
     budget = RemoteBudget(total_remote_limit)
@@ -3125,273 +3342,64 @@ def run_discovery(
         source_budgets[source] = child
         return child
 
-    if "paperlists" in selected:
-        venues = resolve_paperlists_venues(
-            paperlists_venues, cfg.get("paperlists", {}).get("venues"), topic
+    for source in selected:
+        plugin = source_registry.plugin(source)
+        if plugin is None:
+            raise ValueError(f"source has no registered plugin: {source}")
+        source_cfg = cfg.get(source, {})
+        if not isinstance(source_cfg, dict):
+            source_cfg = {}
+        if source == "arxiv":
+            arxiv_queries = source_cfg.get("queries") or default_arxiv_queries(topic)
+            if clean_text(source_cfg.get("budget_policy") or "auto_floor").lower() != "fixed":
+                source_cfg["queries"] = arxiv_queries
+                ensure_arxiv_budget_floor(source_cfg)
+        default_budget_limit: int | None
+        if source == "paperlists":
+            venues = resolve_paperlists_venues(
+                paperlists_venues,
+                source_cfg.get("venues"),
+                topic,
+            )
+            default_budget_limit = _default_source_budget_limit(
+                source,
+                total_remote_limit,
+                years=years,
+                venues=venues,
+            )
+        else:
+            default_budget_limit = _default_source_budget_limit(source, total_remote_limit, years=years)
+        source_budget = (
+            None
+            if source == "gemini_search" and not source_cfg.get("enabled", False)
+            else scoped_budget(source, default_budget_limit)
         )
-        paperlists_budget = scoped_budget(
-            "paperlists",
-            _default_source_budget_limit("paperlists", total_remote_limit, years=years, venues=venues),
-        )
-        results.append(sync_paperlists(
-            workspace,
-            topic,
-            years,
-            venues=venues,
+        context = DiscoveryContext(
+            workspace=workspace,
+            topic=topic,
+            years=years,
+            discovery_config=cfg,
+            source_config=source_cfg,
             refresh=refresh,
             timeout=timeout,
-            budget=paperlists_budget,
-        ))
-
-    if "openalex" in selected:
-        oa_cfg = cfg.get("openalex", {})
-        api_key_env = clean_text(oa_cfg.get("api_key_env", ""))
-        api_key = clean_text(oa_cfg.get("api_key", ""))
-        if api_key_env and not api_key:
-            api_key = os.getenv(api_key_env, "")
-        mailto_env = clean_text(oa_cfg.get("mailto_env", ""))
-        mailto = clean_text(oa_cfg.get("mailto", ""))
-        if mailto_env and not mailto:
-            mailto = os.getenv(mailto_env, "")
-        results.append(sync_openalex(
-            workspace,
-            topic,
-            years,
-            queries=openalex_query_specs(oa_cfg, topic),
-            base_url=clean_text(oa_cfg.get("base_url", "")) or OPENALEX_API,
-            api_key=api_key,
-            mailto=mailto,
-            page_size=int(oa_cfg.get("page_size", 100)),
-            max_pages=int(oa_cfg.get("max_pages", 2)),
-            weak_max_pages=int(oa_cfg.get("weak_max_pages", 1)),
-            modes=[clean_text(mode) for mode in as_list(oa_cfg.get("modes", ["exact"])) if clean_text(mode)],
-            sorts=[clean_text(sort) for sort in as_list(oa_cfg.get("sorts", ["relevance"])) if clean_text(sort)],
-            topic_ids=[clean_text(item) for item in as_list(oa_cfg.get("topic_ids")) if clean_text(item)],
-            refresh=refresh,
-            timeout=int(oa_cfg.get("timeout", timeout)),
-            sleep_seconds=float(oa_cfg.get("sleep_seconds", 0.25)),
-            budget=scoped_budget(
-                "openalex",
-                _default_source_budget_limit("openalex", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "crossref" in selected:
-        cr_cfg = cfg.get("crossref", {})
-        queries = cr_cfg.get("queries") or default_queries(topic)
-        results.append(sync_crossref(
-            workspace,
-            topic,
-            years,
-            queries=[clean_text(q) for q in queries if clean_text(q)],
-            base_url=clean_text(cr_cfg.get("base_url", "")) or CROSSREF_API,
-            max_results=int(cr_cfg.get("max_results", 50)),
-            page_size=int(cr_cfg.get("page_size", 25)),
-            max_pages=int(cr_cfg.get("max_pages", 1)),
-            mailto=clean_text(cr_cfg.get("mailto") or os.getenv(clean_text(cr_cfg.get("mailto_env", "")), "")),
-            refresh=refresh,
-            timeout=int(cr_cfg.get("timeout", timeout)),
-            sleep_seconds=float(cr_cfg.get("sleep_seconds", 0.25)),
-            budget=scoped_budget(
-                "crossref",
-                _default_source_budget_limit("crossref", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "dblp" in selected:
-        dblp_cfg = cfg.get("dblp", {})
-        queries = dblp_cfg.get("queries") or default_queries(topic)
-        results.append(sync_dblp(
-            workspace,
-            topic,
-            years,
-            queries=[clean_text(q) for q in queries if clean_text(q)],
-            base_url=clean_text(dblp_cfg.get("base_url", "")) or DBLP_API,
-            max_results=int(dblp_cfg.get("max_results", 50)),
-            page_size=int(dblp_cfg.get("page_size", 25)),
-            max_pages=int(dblp_cfg.get("max_pages", 1)),
-            refresh=refresh,
-            timeout=int(dblp_cfg.get("timeout", timeout)),
-            sleep_seconds=float(dblp_cfg.get("sleep_seconds", 0.25)),
-            budget=scoped_budget(
-                "dblp",
-                _default_source_budget_limit("dblp", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "acl_anthology" in selected:
-        acl_cfg = cfg.get("acl_anthology", {})
-        venues = [clean_text(v).lower() for v in as_list(acl_cfg.get("venues") or ["acl", "emnlp", "naacl", "eacl", "coling"]) if clean_text(v)]
-        results.append(sync_acl_anthology(
-            workspace,
-            topic,
-            years,
-            venues=venues,
-            base_url=clean_text(acl_cfg.get("base_url", "")) or ACL_ANTHOLOGY_XML,
-            refresh=refresh,
-            timeout=int(acl_cfg.get("timeout", timeout)),
-            sleep_seconds=float(acl_cfg.get("sleep_seconds", 0.25)),
-            budget=scoped_budget(
-                "acl_anthology",
-                _default_source_budget_limit("acl_anthology", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "europepmc" in selected:
-        epmc_cfg = cfg.get("europepmc", {})
-        queries = epmc_cfg.get("queries") or default_queries(topic)
-        results.append(sync_europepmc(
-            workspace,
-            topic,
-            years,
-            queries=[clean_text(q) for q in queries if clean_text(q)],
-            base_url=clean_text(epmc_cfg.get("base_url", "")) or EUROPEPMC_API,
-            max_results=int(epmc_cfg.get("max_results", 50)),
-            page_size=int(epmc_cfg.get("page_size", 25)),
-            max_pages=int(epmc_cfg.get("max_pages", 1)),
-            refresh=refresh,
-            timeout=int(epmc_cfg.get("timeout", timeout)),
-            sleep_seconds=float(epmc_cfg.get("sleep_seconds", 0.25)),
-            budget=scoped_budget(
-                "europepmc",
-                _default_source_budget_limit("europepmc", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "pubmed" in selected:
-        pubmed_cfg = cfg.get("pubmed", {})
-        queries = pubmed_cfg.get("queries") or default_queries(topic)
-        api_key_env = clean_text(pubmed_cfg.get("api_key_env", ""))
-        api_key = clean_text(pubmed_cfg.get("api_key", ""))
-        if api_key_env and not api_key:
-            api_key = os.getenv(api_key_env, "")
-        results.append(sync_pubmed(
-            workspace,
-            topic,
-            years,
-            queries=[clean_text(q) for q in queries if clean_text(q)],
-            base_url=clean_text(pubmed_cfg.get("base_url", "")) or PUBMED_EUTILS_API,
-            max_results=int(pubmed_cfg.get("max_results", 30)),
-            page_size=int(pubmed_cfg.get("page_size", 20)),
-            refresh=refresh,
-            timeout=int(pubmed_cfg.get("timeout", timeout)),
-            sleep_seconds=float(pubmed_cfg.get("sleep_seconds", 0.35)),
-            api_key=api_key,
-            budget=scoped_budget(
-                "pubmed",
-                _default_source_budget_limit("pubmed", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "openreview" in selected:
-        or_cfg = cfg.get("openreview", {})
-        results.append(sync_openreview(
-            workspace,
-            topic,
-            years,
-            invitations=[clean_text(item) for item in as_list(or_cfg.get("invitations")) if clean_text(item)],
-            base_url=clean_text(or_cfg.get("base_url", "")) or OPENREVIEW_API,
-            limit=int(or_cfg.get("limit", 50)),
-            max_pages=int(or_cfg.get("max_pages", 1)),
-            refresh=refresh,
-            timeout=int(or_cfg.get("timeout", timeout)),
-            sleep_seconds=float(or_cfg.get("sleep_seconds", 0.25)),
-            budget=scoped_budget(
-                "openreview",
-                _default_source_budget_limit("openreview", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "semanticscholar" in selected:
-        ss_cfg = cfg.get("semanticscholar", {})
-        queries = ss_cfg.get("queries") or default_queries(topic)
-        api_key_env = clean_text(ss_cfg.get("api_key_env", ""))
-        api_key = clean_text(ss_cfg.get("api_key", ""))
-        if api_key_env and not api_key:
-            api_key = os.getenv(api_key_env, "")
-        results.append(sync_semantic_scholar(
-            workspace,
-            topic,
-            years,
-            queries=[clean_text(q) for q in queries if clean_text(q)],
-            max_results=int(ss_cfg.get("max_results", 1000)),
-            page_size=int(ss_cfg.get("page_size", 100)),
-            api_key=api_key,
-            base_url=clean_text(ss_cfg.get("base_url", "")) or SEMANTIC_SCHOLAR_API,
-            mode=clean_text(ss_cfg.get("mode", "bulk")) or "bulk",
-            year_strategy=clean_text(ss_cfg.get("year_strategy", "range")) or "range",
-            sorts=[clean_text(sort) for sort in as_list(ss_cfg.get("sorts", ["citationCount:desc", "publicationDate:desc"])) if clean_text(sort)],
-            max_pages=int(ss_cfg.get("max_pages", 1)),
-            refresh=refresh,
-            timeout=int(ss_cfg.get("timeout", timeout)),
-            sleep_seconds=float(ss_cfg.get("sleep_seconds", 6.0)),
-            no_key_sleep_seconds=float(ss_cfg.get("no_key_sleep_seconds", 6.0)),
-            retry_attempts=int(ss_cfg["retry_attempts"]) if ss_cfg.get("retry_attempts") not in (None, "") else None,
-            rate_limit_error_limit=int(ss_cfg.get("rate_limit_error_limit", 1)),
-            max_kept_per_run=_positive_int(ss_cfg.get("max_kept_per_run")),
-            budget=scoped_budget(
-                "semanticscholar",
-                _default_source_budget_limit("semanticscholar", total_remote_limit, years=years),
-            ),
-        ))
-
-    if "arxiv" in selected:
-        arxiv_cfg = cfg.get("arxiv", {})
-        queries = arxiv_cfg.get("queries") or default_arxiv_queries(topic)
-        if clean_text(arxiv_cfg.get("budget_policy") or "auto_floor").lower() != "fixed":
-            arxiv_cfg["queries"] = queries
-            ensure_arxiv_budget_floor(arxiv_cfg)
-        results.append(sync_arxiv_discovery(
-            workspace,
-            topic,
-            years,
-            queries=[clean_text(q) for q in queries if clean_text(q)],
-            max_results=int(arxiv_cfg.get("max_results", 100)),
-            page_size=int(arxiv_cfg.get("page_size", 100)),
-            sort_by=clean_text(arxiv_cfg.get("sort_by", "relevance")) or "relevance",
-            refresh=refresh,
-            timeout=int(arxiv_cfg.get("timeout", timeout)),
-            sleep_seconds=float(arxiv_cfg.get("sleep_seconds", 3.2)),
-            rate_limit_error_limit=int(arxiv_cfg.get("rate_limit_error_limit", 3)),
-            retry_attempts=int(arxiv_cfg.get("retry_attempts", 1)),
-            recent_year_count=_positive_int(arxiv_cfg.get("recent_year_count")),
-            budget=scoped_budget(
-                "arxiv",
-                _default_source_budget_limit("arxiv", total_remote_limit, years=years),
-            ),
-            recent_first=_config_bool(arxiv_cfg.get("recent_first", True), True),
-        ))
-
-    if "gemini_search" in selected:
-        gs_cfg = cfg.get("gemini_search", {}) or {}
-        if gs_cfg.get("enabled", False):
-            from .sources.gemini_search import sync_gemini_search
-
-            gs_queries = gs_cfg.get("queries") or default_queries(topic)
-            results.append(sync_gemini_search(
-                workspace,
-                topic,
-                years,
-                queries=[clean_text(q) for q in gs_queries if clean_text(q)],
-                direction=clean_text(topic.get("description") or topic.get("name") or ""),
-                max_results_per_query=int(gs_cfg.get("max_results_per_query", 15)),
-                max_queries=int(gs_cfg.get("max_queries", 6)),
-                timeout=int(gs_cfg.get("timeout", 300)),
-                refresh=refresh,
-                budget=scoped_budget(
-                    "gemini_search",
-                    _default_source_budget_limit("gemini_search", total_remote_limit, years=years),
-                ),
-            ))
-        else:
+            budget=source_budget,
+            paperlists_venues=paperlists_venues,
+        )
+        preflight = plugin.preflight(context)
+        preflight_row = asdict(preflight)
+        preflight_rows.append(preflight_row)
+        if clean_text(preflight.status).lower() == "blocked":
             results.append({
-                "source": "gemini_search",
-                "runs": 0,
-                "seen": 0,
-                "kept": 0,
-                "errors": [{"phase": "config", "error": "discovery.gemini_search.enabled is false"}],
-                "status": "skipped_disabled",
+                "source": source,
+                "status": "blocked_preflight",
+                "preflight": preflight_row,
+                "errors": list(preflight.warnings),
             })
+            continue
+        if source in {"arxiv", "openalex", "semanticscholar"}:
+            results.append(run_structured_source_plugin(plugin, context))
+        else:
+            results.append(plugin.run(context))
 
     build_result: dict[str, Any] | None = None
     catalog_result: dict[str, Any] | None = None
@@ -3408,6 +3416,17 @@ def run_discovery(
         "years": years,
         "sources": selected,
         "source_results": results,
+        "source_preflight": {
+            "manifest": workspace_relative_path(
+                workspace,
+                manifests_dir(workspace) / f"source_preflight_{manifest_stamp}.json",
+            ),
+            "latest": workspace_relative_path(
+                workspace,
+                manifests_dir(workspace) / "source_preflight_latest.json",
+            ),
+            "preflight": preflight_rows,
+        },
         "build": build_result,
         "catalog": catalog_result,
         "coverage_report": (
@@ -3424,5 +3443,31 @@ def run_discovery(
         },
     }
     payload = portable_workspace_data(workspace, payload)
-    write_json(manifests_dir(workspace) / f"discovery_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", payload)
+    preflight_payload = portable_workspace_data(workspace, {
+        "schema_version": "papercompass.source_preflight.v1",
+        "started_at": started,
+        "finished_at": payload.get("finished_at"),
+        "workspace": workspace_label(workspace),
+        "sources": selected,
+        "preflight": preflight_rows,
+        "manifest": workspace_relative_path(
+            workspace,
+            manifests_dir(workspace) / f"source_preflight_{manifest_stamp}.json",
+        ),
+    })
+    preflight_path = manifests_dir(workspace) / f"source_preflight_{manifest_stamp}.json"
+    write_json(preflight_path, preflight_payload)
+    write_json(manifests_dir(workspace) / "source_preflight_latest.json", preflight_payload)
+    write_json(manifests_dir(workspace) / f"discovery_{manifest_stamp}.json", payload)
+    record_run_metric(workspace, {
+        "run_id": manifest_stamp,
+        "command": "discover",
+        "started_at": started,
+        "finished_at": payload.get("finished_at"),
+        "remote_calls_used": payload.get("remote_calls_used"),
+        "remote_calls_limit": payload.get("remote_calls_limit"),
+        "source_error_count": sum(len(result.get("errors") or []) for result in results if isinstance(result, dict)),
+        "source_count": len(results),
+        "qa_status": "",
+    })
     return payload

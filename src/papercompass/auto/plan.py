@@ -19,7 +19,7 @@ from ..config import write_yaml
 from ..roles import NEGATIVE_ROLES, normalize_role, seed_has_source_evidence, seed_required
 from ..scope import infer_publication_scope
 from ..source_budget import ensure_arxiv_budget_floor
-from ..text import clean_text
+from ..text import clean_text, write_jsonl
 
 
 def _slugify(value: str) -> str:
@@ -712,6 +712,7 @@ def render_plan(
     direction: str,
     *,
     topic_id_override: str | None = None,
+    original_query: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Convert a plan into (topic_yaml, sources_yaml, source-backed anchors).
 
@@ -817,6 +818,8 @@ def render_plan(
         "source_filter_terms": source_filter_terms,
         "judge_examples": judge_examples,
     }
+    if original_query is not None and str(original_query).strip():
+        topic_yaml["original_query"] = str(original_query)
     publication_scope = infer_publication_scope(direction, search_hints)
     if publication_scope:
         topic_yaml["publication_scope"] = publication_scope
@@ -1232,10 +1235,7 @@ def inject_verified_seeds_to_raw(
     manual_dir.mkdir(parents=True, exist_ok=True)
     from datetime import datetime as _dt2
     out_path = manual_dir / f"{_dt2.now().strftime('%Y%m%d_%H%M%S')}_verified_seed_injection.jsonl"
-    out_path.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in payload_rows) + "\n",
-        encoding="utf-8",
-    )
+    write_jsonl(out_path, payload_rows)
     return len(payload_rows)
 
 

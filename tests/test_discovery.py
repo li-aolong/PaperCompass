@@ -2,6 +2,8 @@ import json
 import re
 import urllib.error
 
+import pytest
+
 from papercompass.config import init_workspace
 from papercompass.discovery import RemoteBudget, assign_tags, cache_manifest_key, candidate_identity, coverage_health, openalex_item_to_raw
 from papercompass.discovery import crossref_item_to_raw, dblp_item_to_raw, europepmc_item_to_raw, pubmed_summary_to_raw
@@ -9,12 +11,19 @@ from papercompass.discovery import default_discovery_sources, run_discovery, syn
 from papercompass.discovery import topic_match_decision, _topic_discriminators
 from papercompass.discovery import ss_item_to_raw, matches_topic
 from papercompass.discovery import resolve_paperlists_venues
+from papercompass.discovery import paperlists_item_to_raw, resolve_secret
+from papercompass.sources.registry import SourceCapabilities, SourcePreflight, SourceRegistry
 
 
 def test_year_range_only_fetches_requested_extension() -> None:
     topic = {"min_year": 2023}
     assert year_range(topic, None, 2024) == [2023, 2024]
     assert year_range(topic, 2022, 2024) == [2022, 2023, 2024]
+
+
+def test_year_range_requires_explicit_min_year() -> None:
+    with pytest.raises(ValueError, match="min_year"):
+        year_range({}, None, 2024)
 
 
 def test_coverage_health_does_not_mark_budget_complete_caps_as_partial() -> None:
@@ -245,7 +254,7 @@ def test_sync_openalex_honors_api_key_and_mailto(tmp_path, monkeypatch) -> None:
         topic={"topic_id": "x", "min_year": 2024},
         years=[2024],
         queries=[{"text": "test", "modes": ["title"]}],
-        api_key="my_secret_key",
+        api_key="dummy",
         mailto="test@example.com",
         page_size=10,
         max_pages=1,
@@ -253,7 +262,7 @@ def test_sync_openalex_honors_api_key_and_mailto(tmp_path, monkeypatch) -> None:
     )
 
     assert captured_urls
-    assert "api_key=my_secret_key" in captured_urls[0]
+    assert "api_key=dummy" in captured_urls[0]
     assert "mailto=test%40example.com" in captured_urls[0]
 
 
@@ -1062,3 +1071,182 @@ def test_europepmc_uses_next_cursor_for_followup_pages(tmp_path, monkeypatch) ->
     assert result["kept"] == 2
     assert "cursorMark=%2A" in requested_urls[0]
     assert "cursorMark=NEXT" in requested_urls[1]
+
+
+def test_paperlists_item_to_raw_extracts_arxiv_id_from_site_url() -> None:
+    """A3 regression: paperlists items with arXiv site URLs should extract
+    arxiv_id for cross-source linking with the authoritative arXiv source."""
+    # arXiv abs link in site
+    item_abs = {
+        "id": "some_openreview_id",
+        "title": "My Paper",
+        "site": "https://arxiv.org/abs/2401.12345v2",
+    }
+    raw = paperlists_item_to_raw(item_abs, "iclr", 2024)
+    assert raw["arxiv_id"] == "2401.12345", f"Expected version-stripped arXiv ID, got {raw.get('arxiv_id')}"
+
+    # arXiv pdf link in pdf field
+    item_pdf = {
+        "id": "another_id",
+        "title": "Another Paper",
+        "pdf": "https://arxiv.org/pdf/2312.00001.pdf",
+    }
+    raw2 = paperlists_item_to_raw(item_pdf, "nips", 2023)
+    assert raw2["arxiv_id"] == "2312.00001"
+
+    # Non-arXiv site should not produce arxiv_id
+    item_openreview = {
+        "id": "openreview_id",
+        "title": "OpenReview Paper",
+        "site": "https://openreview.net/forum?id=abc123",
+    }
+    raw3 = paperlists_item_to_raw(item_openreview, "iclr", 2025)
+    assert "arxiv_id" not in raw3
+
+    # ACL anthology site should not produce arxiv_id
+    item_acl = {
+        "id": "2024.acl-long.001",
+        "title": "ACL Paper",
+        "site": "https://aclanthology.org/2024.acl-long.001/",
+    }
+    raw4 = paperlists_item_to_raw(item_acl, "acl", 2024)
+    assert "arxiv_id" not in raw4
+    assert raw4["acl_id"] == "2024.acl-long.001"
+
+
+def test_http_get_json_retries_on_transient_network_errors(monkeypatch) -> None:
+    """Validate that http_get_json retries on TimeoutError / URLError / OSError."""
+    from papercompass.discovery import http_get_json
+    import urllib.request
+
+    call_count = 0
+
+    def mock_urlopen(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise TimeoutError("timed out")
+        # Return a mock response
+        class MockResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self):
+                return b'{"status": "ok"}'
+        return MockResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    res = http_get_json("https://api.example.com", attempts=3, backoff=0.01)
+    assert res == {"status": "ok"}
+    assert call_count == 3
+
+
+def test_resolve_secret_uses_default_env_and_direct_config(monkeypatch) -> None:
+    monkeypatch.setenv("OPENALEX_API_KEY", "env-key")
+    assert resolve_secret(
+        {},
+        value_key="api_key",
+        env_key="api_key_env",
+        default_env="OPENALEX_API_KEY",
+    ) == "env-key"
+    assert resolve_secret(
+        {"api_key": "direct-key"},
+        value_key="api_key",
+        env_key="api_key_env",
+        default_env="OPENALEX_API_KEY",
+    ) == "direct-key"
+
+    monkeypatch.setenv("CUSTOM_OPENALEX_KEY", "custom-env-key")
+    assert resolve_secret(
+        {"api_key_env": "CUSTOM_OPENALEX_KEY"},
+        value_key="api_key",
+        env_key="api_key_env",
+        default_env="OPENALEX_API_KEY",
+    ) == "custom-env-key"
+
+
+def test_run_discovery_preserves_source_order_and_writes_preflight(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    (workspace / "topic.yaml").write_text("topic_id: topic\nmin_year: 2024\n", encoding="utf-8")
+    (workspace / "sources.yaml").write_text(
+        "discovery:\n  sources: [zeta, alpha]\n  zeta: {}\n  alpha: {}\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    class FakePlugin:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.capabilities = SourceCapabilities(name=name)
+
+        def preflight(self, context):
+            return SourcePreflight(
+                source=self.name,
+                status="ok",
+                auth_state="anonymous" if self.name == "zeta" else "not_required",
+                warnings=[f"{self.name}_warning"] if self.name == "zeta" else [],
+            )
+
+        def run(self, context):
+            calls.append(self.name)
+            return {"source": self.name, "runs": 1, "seen": 0, "kept": 0, "errors": []}
+
+    registry = SourceRegistry()
+    registry.register_plugin(FakePlugin("alpha"))
+    registry.register_plugin(FakePlugin("zeta"))
+    monkeypatch.setattr("papercompass.discovery.default_source_registry", lambda: registry)
+
+    result = run_discovery(workspace, build=False, catalog=False)
+
+    assert calls == ["zeta", "alpha"]
+    assert [row["source"] for row in result["source_preflight"]["preflight"]] == ["zeta", "alpha"]
+    latest = json.loads((workspace / ".papercompass" / "manifests" / "source_preflight_latest.json").read_text(encoding="utf-8"))
+    assert latest["preflight"][0]["warnings"] == ["zeta_warning"]
+
+
+def test_run_discovery_passes_year_window_to_gemini_search(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    (workspace / "topic.yaml").write_text(
+        "topic_id: topic\nmin_year: 2024\nsource_filter_terms:\n  - latent reasoning\n",
+        encoding="utf-8",
+    )
+    (workspace / "sources.yaml").write_text(
+        "discovery:\n"
+        "  sources: [gemini_search]\n"
+        "  gemini_search:\n"
+        "    enabled: true\n"
+        "    queries:\n"
+        "      - latent reasoning\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_sync_gemini_search(workspace_arg, topic, years, **kwargs):
+        captured["years"] = years
+        return {
+            "source": "gemini_search",
+            "runs": 1,
+            "seen": 0,
+            "kept": 0,
+            "errors": [],
+            "status": "completed",
+        }
+
+    import papercompass.sources.gemini_search as gemini_search
+
+    monkeypatch.setattr(gemini_search, "sync_gemini_search", fake_sync_gemini_search)
+
+    result = run_discovery(
+        workspace,
+        min_year=2024,
+        max_year=2026,
+        sources=["gemini_search"],
+        build=False,
+    )
+
+    assert result["source_results"][0]["source"] == "gemini_search"
+    assert captured["years"] == (2024, 2026)

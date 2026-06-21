@@ -41,6 +41,104 @@ def test_quality_report_detects_raw_pollution_and_catalog_mismatch(tmp_path) -> 
     assert "catalog_count_mismatch" in report["critical"]
 
 
+def test_quality_report_includes_prefilter_efficiency(tmp_path) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    (workspace / "data" / "papers.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "anchor_papers.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "pending_review_candidates.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "rejected_candidates.json").write_text("[]", encoding="utf-8")
+    prefilter_path = workspace / "data" / "prefilter_decisions.jsonl"
+    prefilter_path.write_text(
+        "\n".join([
+            json.dumps({"candidate_key": "a", "action": "review", "sent_to_llm": True, "reasons": ["uncertain_band"]}),
+            json.dumps({"candidate_key": "b", "action": "reject", "sent_to_llm": False, "reasons": ["low_deterministic_relevance"]}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_quality_report(workspace)
+
+    assert report["prefilter_efficiency"]["candidate_count"] == 2
+    assert report["prefilter_efficiency"]["sent_to_llm"] == 1
+    assert report["prefilter_efficiency"]["llm_review_ratio"] == 0.5
+
+
+def test_quality_report_warns_on_prefilter_extremes(tmp_path) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    (workspace / "data" / "papers.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "anchor_papers.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "pending_review_candidates.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "rejected_candidates.json").write_text("[]", encoding="utf-8")
+    rows = [
+        {"candidate_key": f"r{i}", "action": "review", "sent_to_llm": True, "reasons": ["uncertain_band"]}
+        for i in range(220)
+    ] + [
+        {"candidate_key": f"h{i}", "action": "hard_reject", "sent_to_llm": False, "reasons": ["before_min_year"]}
+        for i in range(100)
+    ]
+    prefilter_path = workspace / "data" / "prefilter_decisions.jsonl"
+    prefilter_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    report = build_quality_report(workspace)
+
+    assert "prefilter_too_permissive" in report["warnings"]
+
+
+def test_quality_report_includes_source_preflight_manifest(tmp_path) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    for name in ("papers.json", "anchor_papers.json", "pending_review_candidates.json", "rejected_candidates.json"):
+        (workspace / "data" / name).write_text("[]", encoding="utf-8")
+    preflight_path = workspace / ".papercompass" / "manifests" / "source_preflight_latest.json"
+    preflight_path.parent.mkdir(parents=True, exist_ok=True)
+    preflight_path.write_text(json.dumps({
+        "schema_version": "papercompass.source_preflight.v1",
+        "preflight": [
+            {
+                "source": "openalex",
+                "status": "ok",
+                "auth_state": "anonymous",
+                "warnings": ["openalex_anonymous_access"],
+                "effective_rate_limit_seconds": 0.25,
+            }
+        ],
+    }), encoding="utf-8")
+
+    report = build_quality_report(workspace)
+
+    assert report["source_preflight"]["warning_count"] == 1
+    assert "source_preflight_has_warnings" in report["warnings"]
+
+
+def test_quality_report_detects_build_manifest_integrity_mismatch(tmp_path) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    data_path = workspace / "data" / "papers.json"
+    data_path.write_text("[]", encoding="utf-8")
+    (workspace / "data" / "anchor_papers.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "pending_review_candidates.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "rejected_candidates.json").write_text("[]", encoding="utf-8")
+    manifest_path = workspace / ".papercompass" / "manifests" / "latest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({
+        "outputs": {
+            "papers_json": {
+                "path": "data/papers.json",
+                "sha256": "wrong",
+                "bytes": 2,
+                "records": 0,
+            }
+        }
+    }), encoding="utf-8")
+
+    report = build_quality_report(workspace)
+
+    assert report["build_manifest_integrity"]["mismatch_count"] == 1
+    assert "build_manifest_integrity_mismatch" in report["critical"]
+
+
 def test_quality_report_separates_medium_and_hard_source_coverage(tmp_path) -> None:
     workspace = tmp_path / "topic"
     init_workspace(workspace, "topic")
@@ -170,13 +268,37 @@ def test_quality_report_refreshes_stale_coverage_manifest(tmp_path) -> None:
     coverage_report_path.parent.mkdir(parents=True, exist_ok=True)
     coverage_report_path.write_text(json.dumps({"paper_count": 1}), encoding="utf-8")
 
-    report = build_quality_report(workspace)
+    report = build_quality_report(workspace, refresh_coverage=True)
     refreshed = json.loads(coverage_report_path.read_text(encoding="utf-8"))
 
     assert refreshed["paper_count"] == 2
     assert report["coverage_manifest"]["refresh_status"] == "refreshed"
     assert report["coverage_manifest"]["count_matches"] is True
     assert "coverage_report_count_mismatch" not in report["critical"]
+
+
+def test_quality_report_does_not_refresh_coverage_manifest_by_default(tmp_path) -> None:
+    workspace = tmp_path / "topic"
+    init_workspace(workspace, "topic")
+    papers = [{"title": "A", "year": 2024}, {"title": "B", "year": 2025}]
+    (workspace / "data" / "papers.json").write_text(json.dumps(papers), encoding="utf-8")
+    (workspace / "data" / "pending_review_candidates.json").write_text("[]", encoding="utf-8")
+    (workspace / "data" / "rejected_candidates.json").write_text("[]", encoding="utf-8")
+    (workspace / "catalog").mkdir(exist_ok=True)
+    (workspace / "catalog" / "manifest.json").write_text(
+        json.dumps({"paper_count": 2}), encoding="utf-8"
+    )
+    coverage_report_path = workspace / ".papercompass" / "manifests" / "coverage_report.json"
+    coverage_report_path.parent.mkdir(parents=True, exist_ok=True)
+    coverage_report_path.write_text(json.dumps({"paper_count": 1}), encoding="utf-8")
+
+    report = build_quality_report(workspace)
+    unchanged = json.loads(coverage_report_path.read_text(encoding="utf-8"))
+
+    assert unchanged["paper_count"] == 1
+    assert report["coverage_manifest"]["refresh_status"] == "not_refreshed"
+    assert report["coverage_manifest"]["count_matches"] is False
+    assert "coverage_report_count_mismatch" in report["critical"]
 
 
 def test_quality_report_flags_semantic_scholar_auth_problem(tmp_path) -> None:

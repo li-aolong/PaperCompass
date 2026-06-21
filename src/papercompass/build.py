@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,19 @@ from .candidate_review import workspace_decision_context_hash
 from .normalize import deduplicate_papers, identity_keys, merge_paper, normalize_raw_candidate, rank_score
 from .roles import ANCHOR_ROLES, CORE_METHOD, MAIN_LIBRARY_ROLES, NEGATIVE_ROLES, normalize_role
 from .scope import paper_matches_publication_scope, publication_scope_from_topic
-from .text import as_list, iter_jsonl, normalize_title, read_json, slugify, write_json, write_jsonl
+from .text import (
+    append_jsonl_locked,
+    append_text_locked,
+    as_list,
+    atomic_write_text,
+    iter_jsonl,
+    normalize_title,
+    read_json,
+    slugify,
+    workspace_lock,
+    write_json,
+    write_jsonl,
+)
 
 
 def stamp() -> str:
@@ -32,6 +45,16 @@ def stamp() -> str:
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def output_file_manifest(workspace: Path, path: Path, records: int | None = None) -> dict[str, Any]:
+    data = path.read_bytes() if path.exists() else b""
+    return {
+        "path": workspace_relative_path(workspace, path),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "bytes": len(data),
+        "records": records,
+    }
 
 
 def read_items(path: Path) -> list[Any]:
@@ -144,7 +167,7 @@ def record_agent_run_step(
         active_run_id = f"agent_{stamp()}"
     else:
         active_run_id = current_path.read_text(encoding="utf-8").strip()
-    current_path.write_text(active_run_id, encoding="utf-8")
+    atomic_write_text(current_path, active_run_id)
 
     entry = {
         "run_id": active_run_id,
@@ -156,27 +179,27 @@ def record_agent_run_step(
         "files": files or [],
     }
     steps_path = log_dir / "agent_build_steps.jsonl"
-    with steps_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    append_jsonl_locked(steps_path, [entry])
 
     md_path = log_dir / "AGENT_BUILD_LOG.md"
     if not md_path.exists():
-        md_path.write_text("# Agent 建库日志\n\n", encoding="utf-8")
-    with md_path.open("a", encoding="utf-8") as handle:
-        handle.write(f"## {entry['created_at']} {phase}\n\n")
-        handle.write(f"- run_id：`{active_run_id}`\n")
-        handle.write(f"- status：`{status}`\n")
-        if summary:
-            handle.write(f"- summary：{summary}\n")
-        if command:
-            handle.write(f"- command：`{command}`\n")
-        if files:
-            handle.write(f"- files：{', '.join(f'`{item}`' for item in files)}\n")
-        handle.write("\n")
+        atomic_write_text(md_path, "# Agent 建库日志\n\n")
+    md_lines = [
+        f"## {entry['created_at']} {phase}",
+        "",
+        f"- run_id：`{active_run_id}`",
+        f"- status：`{status}`",
+    ]
+    if summary:
+        md_lines.append(f"- summary：{summary}")
+    if command:
+        md_lines.append(f"- command：`{command}`")
+    if files:
+        md_lines.append(f"- files：{', '.join(f'`{item}`' for item in files)}")
+    append_text_locked(md_path, "\n".join(md_lines) + "\n\n")
 
     worklog = log_dir / "WORKLOG.md"
-    with worklog.open("a", encoding="utf-8") as handle:
-        handle.write(f"- {entry['created_at']} agent_run: {json.dumps(entry, ensure_ascii=False, sort_keys=True)}\n")
+    append_text_locked(worklog, f"- {entry['created_at']} agent_run: {json.dumps(entry, ensure_ascii=False, sort_keys=True)}\n")
     return {
         "run_id": active_run_id,
         "step_log": workspace_relative_path(workspace, steps_path),
@@ -295,6 +318,13 @@ def apply_review_decision(paper: dict[str, Any], decision_index: dict[str, dict[
         value = str(matched.get(key) or "").strip()
         if value:
             paper["review_decision"][key] = value
+    confidence = str(matched.get("confidence") or "").strip().lower()
+    if confidence:
+        paper["review_decision"]["confidence"] = confidence
+    for key in ("inclusion_evidence", "exclusion_evidence", "missing_information"):
+        values = matched.get(key)
+        if isinstance(values, list) and values:
+            paper["review_decision"][key] = values[:3]
     tags = set(paper.get("system_tags") or [])
     if decision == "accept":
         paper["decision"] = {"included": True, "reason": "review_accept", "confidence": "reviewed", "year": paper.get("year")}
@@ -487,6 +517,11 @@ def apply_publication_scope_gate(
 
 
 def build_workspace(workspace: Path) -> dict[str, Any]:
+    with workspace_lock(workspace):
+        return _build_workspace_unlocked(workspace)
+
+
+def _build_workspace_unlocked(workspace: Path) -> dict[str, Any]:
     ensure_workspace_dirs(workspace)
     topic = load_topic_config(workspace)
     run_id = stamp()
@@ -584,13 +619,13 @@ def build_workspace(workspace: Path) -> dict[str, Any]:
         "anchor_paper_count": len(anchor_papers),
         "publication_scope_gate": publication_scope_gate,
         "outputs": {
-            "papers_json": "data/papers.json",
-            "papers_jsonl": "data/papers.jsonl",
-            "anchor_papers_json": "data/anchor_papers.json",
-            "anchor_papers_jsonl": "data/anchor_papers.jsonl",
-            "topic_papers_jsonl": "data/topic_papers.jsonl",
-            "pending_review_candidates": "data/pending_review_candidates.json",
-            "rejected_candidates": "data/rejected_candidates.json",
+            "papers_json": output_file_manifest(workspace, out_data_dir / "papers.json", len(papers)),
+            "papers_jsonl": output_file_manifest(workspace, out_data_dir / "papers.jsonl", len(papers)),
+            "anchor_papers_json": output_file_manifest(workspace, out_data_dir / "anchor_papers.json", len(anchor_papers)),
+            "anchor_papers_jsonl": output_file_manifest(workspace, out_data_dir / "anchor_papers.jsonl", len(anchor_papers)),
+            "topic_papers_jsonl": output_file_manifest(workspace, out_data_dir / "topic_papers.jsonl", len(topic_papers)),
+            "pending_review_candidates": output_file_manifest(workspace, out_data_dir / "pending_review_candidates.json", len(pending_records)),
+            "rejected_candidates": output_file_manifest(workspace, out_data_dir / "rejected_candidates.json", len(rejected_records)),
         },
     }
     manifest = portable_workspace_data(workspace, manifest)
@@ -720,8 +755,7 @@ def write_run_log(workspace: Path, kind: str, payload: dict[str, Any]) -> Path:
     ]
     for key, value in payload.items():
         lines.append(f"- {key}：`{value}`")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")
     worklog = log_dir / "WORKLOG.md"
-    with worklog.open("a", encoding="utf-8") as handle:
-        handle.write(f"- {now_iso()} {kind}: {json.dumps(payload, ensure_ascii=False, sort_keys=True)}\n")
+    append_text_locked(worklog, f"- {now_iso()} {kind}: {json.dumps(payload, ensure_ascii=False, sort_keys=True)}\n")
     return path

@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +39,15 @@ from ..config import (
     workspace_label,
     workspace_relative_path,
 )
+from ..confirmation import (
+    ConfirmationTokenError,
+    auto_build_confirmation_inputs,
+    legacy_user_confirmation_allowed,
+    validate_confirmation_token,
+)
+from ..metrics import record_run_metric
 from ..plugins import BrainPlugin, select_brain
-from ..text import read_json
+from ..text import read_json, workspace_lock, write_json
 from ..workspace_contract import workspace_contract_summary
 from .fusion import FusionThresholds, FusionWeights
 from .stages import (
@@ -61,6 +69,10 @@ from .state import AutoState
 # previously generated artifacts in older workspaces. Increments force any
 # workspace from a prior schema to require --fresh.
 WORKSPACE_FINGERPRINT_VERSION = 1
+
+
+class ConfirmationRequired(RuntimeError):
+    """Raised when formal auto-build is invoked before user confirmation."""
 
 
 def _workspace_fingerprint(
@@ -133,9 +145,7 @@ def _check_workspace_fingerprint(
         if removed:
             print(f"papercompass auto: --fresh wiped {removed}")
         fp_path.parent.mkdir(parents=True, exist_ok=True)
-        fp_path.write_text(
-            json.dumps(fp, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        write_json(fp_path, fp)
         return
     if fp_path.exists():
         existing = json.loads(fp_path.read_text(encoding="utf-8"))
@@ -158,9 +168,7 @@ def _check_workspace_fingerprint(
             "wipe and rebuild, or use a different --workspace."
         )
     fp_path.parent.mkdir(parents=True, exist_ok=True)
-    fp_path.write_text(
-        json.dumps(fp, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json(fp_path, fp)
 
 
 HARD_DELIVERY_WARNINGS = {
@@ -376,6 +384,46 @@ def _with_added_warnings(qa_report: dict[str, Any], warnings: list[str]) -> dict
     return report
 
 
+def _auto_remote_call_metrics(state: AutoState) -> dict[str, int | None]:
+    used = 0
+    limit: int | None = None
+    for stage_name, stage_data in (state.get("stages", {}) or {}).items():
+        if not stage_name.startswith("discover_iter") or not isinstance(stage_data, dict):
+            continue
+        summary = stage_data.get("summary") if isinstance(stage_data.get("summary"), dict) else {}
+        used += int(summary.get("remote_calls_used") or 0)
+        stage_limit = summary.get("remote_calls_limit")
+        if stage_limit is not None:
+            limit = max(limit or 0, int(stage_limit))
+    return {"remote_calls_used": used, "remote_calls_limit": limit}
+
+
+def _auto_review_cache_metrics(state: AutoState) -> dict[str, int]:
+    score = (state.get("stages", {}) or {}).get("score_papers") or {}
+    if not isinstance(score, dict):
+        return {"review_cache_hit_count": 0, "review_cache_miss_count": 0}
+    return {
+        "review_cache_hit_count": int(score.get("review_cache_hit_count") or 0),
+        "review_cache_miss_count": int(score.get("review_cache_miss_count") or 0),
+        "partial_cache_hit_count": int(score.get("partial_cache_hit_count") or 0),
+    }
+
+
+def _auto_reflection_metrics(state: AutoState) -> dict[str, Any]:
+    boundary = (state.get("stages", {}) or {}).get("resolve_boundary") or {}
+    if not isinstance(boundary, dict):
+        return {
+            "reflection_candidate_count": 0,
+            "direct_boundary_resolved_count": 0,
+            "reflection_trigger_reasons": {},
+        }
+    return {
+        "reflection_candidate_count": int(boundary.get("reflection_count") or 0),
+        "direct_boundary_resolved_count": int(boundary.get("direct_resolved_count") or 0),
+        "reflection_trigger_reasons": boundary.get("reflection_trigger_reasons") or {},
+    }
+
+
 def _write_queue_gate_summary(
     *,
     workspace: Path,
@@ -394,6 +442,7 @@ def _write_queue_gate_summary(
     seed_total: int,
     allow_no_embedding: bool = False,
 ) -> AutoBuildResult:
+    run_started_at = datetime.now().isoformat(timespec="seconds")
     reason_codes = list(queue_diagnosis.get("reason_codes") or [])
     qa_for_delivery = _with_added_warnings(qa_report, reason_codes)
     counts = qa_for_delivery.get("counts") or {}
@@ -508,7 +557,24 @@ def _write_queue_gate_summary(
         },
     }
     summary = portable_workspace_data(workspace, summary)
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(summary_path, summary)
+    run_finished_at = datetime.now().isoformat(timespec="seconds")
+    remote_metrics = _auto_remote_call_metrics(state)
+    record_run_metric(workspace, {
+        "run_id": f"auto_{topic.get('topic_id') or 'unknown'}",
+        "command": "auto-build",
+        "started_at": run_started_at,
+        "finished_at": run_finished_at,
+        "remote_calls_used": remote_metrics["remote_calls_used"],
+        "remote_calls_limit": remote_metrics["remote_calls_limit"],
+        "llm_input_tokens": 0,
+        "llm_output_tokens": 0,
+        "llm_cost_usd": 0.0,
+        "source_error_count": (qa_for_delivery.get("source_coverage") or {}).get("problem_count", 0),
+        "qa_status": qa_for_delivery.get("status"),
+        "prefilter_candidate_count": (qa_for_delivery.get("prefilter_efficiency") or {}).get("candidate_count"),
+        "prefilter_llm_review_ratio": (qa_for_delivery.get("prefilter_efficiency") or {}).get("llm_review_ratio"),
+    })
     record_agent_run_step(
         workspace,
         phase="auto-build-review-queue-gate",
@@ -569,7 +635,105 @@ def run_auto_build(
     allow_no_embedding: bool = False,
     prior_markdown: str | None = None,
     seed_cap: int | None = None,
+    user_confirmed: bool = False,
+    confirmed_token: str | None = None,
+    original_query: str | None = None,
 ) -> AutoBuildResult:
+    lock_workspace = workspace.resolve()
+    with workspace_lock(lock_workspace):
+        if not plan_only:
+            inputs = auto_build_confirmation_inputs(
+                workspace=lock_workspace,
+                direction=direction,
+                min_year=min_year,
+                sources=sources,
+                brain=brain if isinstance(brain, str) else getattr(brain, "name", None),
+                second_brain=second_brain if isinstance(second_brain, str) else getattr(second_brain, "name", None),
+                max_remote_calls=max_remote_calls,
+                refresh=refresh,
+                fresh=fresh,
+                weak_batch_size=weak_batch_size,
+                weak_max_batches=weak_max_batches,
+                boundary_max_batches=boundary_max_batches,
+                topic_id=topic_id_override,
+                allow_no_embedding=allow_no_embedding,
+                seed_cap=seed_cap,
+                original_query=original_query,
+                prior_markdown=prior_markdown,
+            )
+            if confirmed_token:
+                try:
+                    validate_confirmation_token(
+                        lock_workspace,
+                        confirmed_token,
+                        command="auto-build",
+                        inputs=inputs,
+                    )
+                except ConfirmationTokenError as exc:
+                    raise ConfirmationRequired(str(exc)) from exc
+                user_confirmed = True
+            elif user_confirmed and legacy_user_confirmation_allowed():
+                user_confirmed = True
+            else:
+                raise ConfirmationRequired(
+                    "正式 auto-build 需要有效 --confirmed-token；请先运行 "
+                    "`papercompass auto-build --prepare ...`，让用户确认参数后再执行。"
+                )
+        return _run_auto_build_unlocked(
+            lock_workspace,
+            direction,
+            brain=brain,
+            second_brain=second_brain,
+            min_year=min_year,
+            max_remote_calls=max_remote_calls,
+            refresh=refresh,
+            sources=sources,
+            weak_batch_size=weak_batch_size,
+            weak_max_batches=weak_max_batches,
+            boundary_max_batches=boundary_max_batches,
+            plan_only=plan_only,
+            verbose=verbose,
+            fresh=fresh,
+            topic_id_override=topic_id_override,
+            allow_no_embedding=allow_no_embedding,
+            prior_markdown=prior_markdown,
+            seed_cap=seed_cap,
+            user_confirmed=user_confirmed,
+            confirmed_token=confirmed_token,
+            original_query=original_query,
+        )
+
+
+def _run_auto_build_unlocked(
+    workspace: Path,
+    direction: str,
+    *,
+    brain: BrainPlugin | str | None = None,
+    second_brain: BrainPlugin | str | None = None,
+    min_year: int | None = None,
+    max_remote_calls: int = 120,
+    refresh: bool = False,
+    sources: list[str] | None = None,
+    weak_batch_size: int = 25,
+    weak_max_batches: int | None = 20,
+    boundary_max_batches: int | None = None,
+    plan_only: bool = False,
+    verbose: bool = False,
+    fresh: bool = False,
+    topic_id_override: str | None = None,
+    allow_no_embedding: bool = False,
+    prior_markdown: str | None = None,
+    seed_cap: int | None = None,
+    user_confirmed: bool = False,
+    confirmed_token: str | None = None,
+    original_query: str | None = None,
+) -> AutoBuildResult:
+    run_started_at = datetime.now().isoformat(timespec="seconds")
+    if not plan_only and not (user_confirmed or confirmed_token):
+        raise ConfirmationRequired(
+            "正式 auto-build 需要有效 --confirmed-token；请先运行 --prepare。"
+        )
+
     if isinstance(brain, str) or brain is None:
         brain_plugin = select_brain(preference=brain)
     else:
@@ -585,13 +749,14 @@ def run_auto_build(
     else:
         second_brain_plugin = second_brain
 
-    workspace = workspace.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     fp = _workspace_fingerprint(direction, min_year, sources)
     _check_workspace_fingerprint(workspace, fp, fresh=fresh)
     ensure_workspace_dirs(workspace)
     state = AutoState(workspace, verbose=verbose)
     state.set("direction", direction)
+    if original_query is not None and str(original_query).strip():
+        state.set("original_query", str(original_query))
     state.set("brain", brain_plugin.name)
     state.set("min_year", min_year)
 
@@ -605,6 +770,7 @@ def run_auto_build(
         topic_id_override=topic_id_override,
         prior_markdown=prior_markdown,
         seed_cap=seed_cap,
+        original_query=original_query,
     )
     topic = load_topic_config(workspace)
 
@@ -809,9 +975,9 @@ def run_auto_build(
     )
     stage_build(workspace, state=state, label="build_after_score")
 
-    # Resolve boundaries before final build — never punt to user.
-    # When --second-brain is supplied, cross-model second-pass scoring
-    # is the most reliable way to flip ambiguous boundary papers.
+    # Resolve boundaries before final build. The default single-main-brain flow
+    # handles this pass; --second-brain is an advanced opt-in for users who
+    # explicitly want a different scorer for boundary cases.
     effective_boundary_max_batches = (
         boundary_max_batches
         if boundary_max_batches is not None
@@ -892,12 +1058,16 @@ def run_auto_build(
     truncations: list[dict[str, Any]] = []
     for stage_name, stage_data in (state.get("stages", {}) or {}).items():
         if isinstance(stage_data, dict) and stage_data.get("truncated"):
-            truncations.append({
+            entry: dict[str, Any] = {
                 "stage": stage_name,
                 "reason": stage_data.get("truncation_reason") or "unspecified",
                 "uncovered": stage_data.get("uncovered_capped", 0),
                 "batches": stage_data.get("batches"),
-            })
+            }
+            trunc_expl = stage_data.get("truncation_explanation")
+            if trunc_expl:
+                entry["explanation"] = trunc_expl
+            truncations.append(entry)
     brain_missing_scores: list[dict[str, Any]] = []
     for stage_name, stage_data in (state.get("stages", {}) or {}).items():
         missing = (
@@ -906,7 +1076,18 @@ def run_auto_build(
             else 0
         )
         if missing > 0:
-            brain_missing_scores.append({"stage": stage_name, "missing": missing})
+            explanation = (
+                stage_data.get("brain_missing_explanation") or ""
+            ) if isinstance(stage_data, dict) else ""
+            truncation_explanation = (
+                stage_data.get("truncation_explanation") or ""
+            ) if isinstance(stage_data, dict) else ""
+            entry: dict[str, Any] = {"stage": stage_name, "missing": missing}
+            if explanation:
+                entry["explanation"] = explanation
+            if truncation_explanation:
+                entry["truncation_hint"] = truncation_explanation
+            brain_missing_scores.append(entry)
 
     # Sum brain usage / cost from iterations.jsonl. Plugins that report
     # token / cost (DeepSeekAPIPlugin) populate these via log_brain_call's
@@ -1049,7 +1230,28 @@ def run_auto_build(
         },
     }
     summary = portable_workspace_data(workspace, summary)
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(summary_path, summary)
+    run_finished_at = datetime.now().isoformat(timespec="seconds")
+    remote_metrics = _auto_remote_call_metrics(state)
+    cache_metrics = _auto_review_cache_metrics(state)
+    reflection_metrics = _auto_reflection_metrics(state)
+    record_run_metric(workspace, {
+        "run_id": f"auto_{topic.get('topic_id') or 'unknown'}",
+        "command": "auto-build",
+        "started_at": run_started_at,
+        "finished_at": run_finished_at,
+        "remote_calls_used": remote_metrics["remote_calls_used"],
+        "remote_calls_limit": remote_metrics["remote_calls_limit"] or max_remote_calls,
+        "llm_input_tokens": total_input,
+        "llm_output_tokens": total_output,
+        "llm_cost_usd": round(total_cost, 6),
+        **cache_metrics,
+        **reflection_metrics,
+        "source_error_count": (qa_report.get("source_coverage") or {}).get("problem_count", 0),
+        "qa_status": qa_report.get("status"),
+        "prefilter_candidate_count": (qa_report.get("prefilter_efficiency") or {}).get("candidate_count"),
+        "prefilter_llm_review_ratio": (qa_report.get("prefilter_efficiency") or {}).get("llm_review_ratio"),
+    })
 
     return AutoBuildResult(
         workspace=workspace,

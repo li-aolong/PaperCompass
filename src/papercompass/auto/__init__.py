@@ -1,3 +1,3 @@
-from .orchestrator import run_auto_build, AutoBuildResult
+from .orchestrator import AutoBuildResult, ConfirmationRequired, run_auto_build
 
-__all__ = ["run_auto_build", "AutoBuildResult"]
+__all__ = ["run_auto_build", "AutoBuildResult", "ConfirmationRequired"]

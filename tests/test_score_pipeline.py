@@ -20,6 +20,20 @@ from papercompass.auto.state import AutoState
 from papercompass.plugins import BrainPlugin, BrainResponse
 
 
+def _score_row(candidate_key: str, score: int) -> dict:
+    confidence = "high" if score >= 75 else "medium" if score >= 35 else "low"
+    return {
+        "candidate_key": candidate_key,
+        "score": score,
+        "paper_role": "core_method",
+        "confidence": confidence,
+        "inclusion_evidence": ["stub inclusion"] if score >= 35 else [],
+        "exclusion_evidence": ["stub exclusion"] if score < 35 else [],
+        "missing_information": [],
+        "reason": "stub",
+    }
+
+
 class CannedScoreBrain(BrainPlugin):
     """Returns 0-100 scores from a fixed dict {candidate_key: score}."""
 
@@ -46,7 +60,7 @@ class CannedScoreBrain(BrainPlugin):
         rows = []
         for k in keys_in_prompt:
             score = int(self.scores_by_key.get(k, 50))
-            rows.append({"candidate_key": k, "score": score, "reason": "stub"})
+            rows.append(_score_row(k, score))
         payload = {"scores": rows}
         text = json.dumps(payload)
         return BrainResponse(
@@ -72,7 +86,7 @@ class OmitFirstScoreBrain(CannedScoreBrain):
             keys_in_prompt = keys_in_prompt[1:]
             self.omitted_once = True
         rows = [
-            {"candidate_key": k, "score": int(self.scores_by_key.get(k, 50)), "reason": "stub"}
+            _score_row(k, int(self.scores_by_key.get(k, 50)))
             for k in keys_in_prompt
         ]
         payload = {"scores": rows}
@@ -149,10 +163,40 @@ def test_score_papers_classifies_by_fused_score(tmp_path: Path):
         batch_size=10,
     )
     assert result["status"] == "completed"
+    assert result["prefilter"]["candidate_count"] >= 3
+    prefilter_path = Path(result["prefilter_decisions"])
+    assert prefilter_path.name == "prefilter_decisions.jsonl"
+    prefilter_rows = [
+        json.loads(line)
+        for line in prefilter_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(prefilter_rows) == result["prefilter"]["candidate_count"]
+    assert all("sent_to_llm" in row for row in prefilter_rows)
     counts = result["counts"]
     # Each verdict should appear at least once given our stub scores
     assert counts.get("in_scope", 0) >= 1
     assert counts.get("out_of_scope", 0) >= 1
+    score_rows = [
+        json.loads(line)
+        for line in Path(result["decisions"]).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(float(row["brain_confidence"]) >= 0.8 for row in score_rows)
+    assert any(row["inclusion_evidence"] == ["stub inclusion"] for row in score_rows)
+    assert all("prefilter_score" in row for row in score_rows)
+    assert any(row["prefilter_topic_hits"] for row in score_rows)
+    review_path = Path(result["decisions"]).with_name(
+        Path(result["decisions"]).stem.replace("score_decisions_", "review_decisions_")
+        + ".jsonl"
+    )
+    review_rows = [
+        json.loads(line)
+        for line in review_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(float(row["confidence"]) >= 0.8 for row in review_rows)
+    assert any(row["inclusion_evidence"] == ["stub inclusion"] for row in review_rows)
 
 
 def test_required_manual_seed_bypasses_min_year_and_routes_to_anchor(tmp_path: Path):
@@ -414,11 +458,14 @@ def test_score_papers_resumes_from_partial_cache(tmp_path: Path):
         if line.strip()
     ]
     assert len(cached) >= 2, f"first batch's keys should be cached, got {cached}"
+    assert all(row.get("cache_key") for row in cached)
+    v2_cache = ws / ".papercompass" / "cache" / "review" / "brain_scores.v2.jsonl"
+    assert v2_cache.exists()
 
     # Run 2: a fresh AutoState (state.stage_done would otherwise short-circuit).
     state2 = AutoState(ws)
     state2.set("stages", {})
-    healthy = CannedScoreBrain(scores)
+    healthy = FailAfterNBatchesBrain(scores, fail_after=100)
     result = stage_score_papers(ws, brain=healthy, state=state2, batch_size=2,
                                 max_batches=10)
     assert result["status"] == "completed"
@@ -426,10 +473,10 @@ def test_score_papers_resumes_from_partial_cache(tmp_path: Path):
     # cached batch was skipped (we don't re-pay for it).
     n_keys = len(pending)
     total_batches = (n_keys + 1) // 2
-    assert healthy.calls
-    assert len(healthy.calls) < total_batches, (
+    assert healthy.batches
+    assert healthy.batches < total_batches, (
         f"resume should skip cached batches; brain was called "
-        f"{len(healthy.calls)} times for {n_keys} keys / batch_size=2 "
+        f"{healthy.batches} times for {n_keys} keys / batch_size=2 "
         f"(total batches={total_batches})"
     )
     # Partial cache cleaned up after a clean completion.
@@ -472,6 +519,52 @@ def test_resolve_boundary_promotes_or_rejects_via_metadata(tmp_path: Path):
     assert sum(final.values()) == result["boundary_total"]
     assert "in_scope" in final
     assert "out_of_scope" in final
+    reflections = ws / ".papercompass" / "cache" / "review" / "reflections.v1.jsonl"
+    assert reflections.exists()
+    assert "initial_review" in reflections.read_text(encoding="utf-8")
+    row = json.loads(reflections.read_text(encoding="utf-8").splitlines()[0])
+    assert row["cache_key"]
+    assert row["prompt_version"] == "papercompass.reflection.v1"
+    assert row["schema_version"] == "papercompass.reflection_schema.v1"
+    assert row["policy_version"] == "papercompass.boundary_reflection_policy.v1"
+
+
+def test_resolve_boundary_skips_reflection_for_clear_first_brain(tmp_path: Path):
+    from papercompass.auto.stages import (
+        stage_resolve_boundary,
+        stage_score_papers,
+    )
+    from papercompass.build import build_workspace
+    from papercompass.text import read_json
+
+    ws = _setup_workspace(tmp_path)
+    build_workspace(ws)
+    pending = read_json(ws / "data" / "pending_review_candidates.json", [])
+    keys = [p["candidate_key"] for p in pending]
+
+    state = AutoState(ws)
+    stage_score_papers(
+        ws,
+        brain=CannedScoreBrain({key: 65 for key in keys}),
+        state=state,
+        batch_size=10,
+    )
+    second_brain = CannedScoreBrain({key: 5 for key in keys})
+    result = stage_resolve_boundary(
+        ws,
+        brain=second_brain,
+        state=state,
+        batch_size=10,
+    )
+
+    assert result["status"] == "completed"
+    assert result["boundary_total"] >= 1
+    assert result["reflection_count"] == 0
+    assert result["direct_resolved_count"] == result["boundary_total"]
+    assert second_brain.calls == []
+    assert result["final_counts"]["in_scope"] == result["boundary_total"]
+    reflections = ws / ".papercompass" / "cache" / "review" / "reflections.v1.jsonl"
+    assert not reflections.exists()
 
 
 def test_claude_plugin_detects_not_logged_in():
@@ -500,6 +593,8 @@ def test_claude_plugin_detects_not_logged_in():
         stderr = ""
 
     plugin = ClaudePlugin()
+    original_is_available = ClaudePlugin.is_available
+    ClaudePlugin.is_available = classmethod(lambda cls: True)
     original_run = subprocess.run
     subprocess.run = lambda *a, **kw: FakeProc()  # type: ignore[assignment]
     try:
@@ -507,3 +602,4 @@ def test_claude_plugin_detects_not_logged_in():
             plugin._ask_once("test prompt", schema={"type": "object"})
     finally:
         subprocess.run = original_run
+        ClaudePlugin.is_available = original_is_available

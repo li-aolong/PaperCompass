@@ -13,6 +13,7 @@ from papercompass.normalize import (
     canonical_venue,
     deduplicate_papers,
     identity_keys,
+    merge_paper,
     normalize_raw_candidate,
     relevance_decision,
 )
@@ -108,6 +109,49 @@ def test_identity_keys_reads_top_level_seed_ids():
 
     assert "arxiv:2412.06769" in keys
     assert "doi:10.48550/arxiv.2412.06769" in keys
+
+
+def test_identity_keys_do_not_include_bare_title_key():
+    keys = identity_keys({"title": "A Shared Paper Title", "year": 2024})
+
+    assert "title:a shared paper title:2024" in keys
+    assert "title:a shared paper title" not in keys
+
+
+def test_deduplicate_keeps_same_title_different_years_without_strong_id():
+    papers = [
+        {"title": "A Shared Paper Title", "year": 2024},
+        {"title": "A Shared Paper Title", "year": 2025},
+    ]
+
+    result = deduplicate_papers(papers)
+
+    assert len(result) == 2
+    assert {paper["year"] for paper in result} == {2024, 2025}
+
+
+def test_merge_decision_keeps_trusted_over_pending_regardless_of_order():
+    trusted = {
+        "title": "Trusted Paper",
+        "year": 2024,
+        "decision": {"included": True, "reason": "trusted_import", "confidence": "trusted"},
+    }
+    pending = {
+        "title": "Trusted Paper",
+        "year": 2024,
+        "decision": {
+            "included": False,
+            "reason": "pending_fusion_score",
+            "confidence": "weak",
+            "needs_review": True,
+        },
+    }
+
+    for existing, incoming in ((trusted, pending), (pending, trusted)):
+        merged = merge_paper(existing, incoming)
+        assert merged["decision"]["included"] is True
+        assert merged["decision"]["reason"] == "trusted_import"
+        assert "needs_review" not in merged["decision"]
 
 
 # test_term_hits_uses_word_boundaries — _term_hits was the v2 keyword

@@ -10,10 +10,12 @@
 uv run --no-sync papercompass auto-build \
   --direction "<research direction>" \
   --min-year 2022 \
+  --prepare \
   -v
 ```
 
 对话式 Agent 不能在用户首次请求后直接运行。必须先按 [AGENT_ENTRY.md](../AGENT_ENTRY.md) 补齐研究方向、年份、in-scope / out-of-scope，并等待用户确认。
+正式构建必须先 `--prepare` 生成 token，用户确认后再传 `--confirmed-token`；这是代码层确认门。`--plan-only` 只做方向计划预览，可不传。
 
 ## 它负责什么
 
@@ -25,6 +27,7 @@ plan_direction
   -> discover_iter1
   -> seed_check / repair
   -> qa_pass1
+  -> deterministic_prefilter
   -> score_papers
   -> build_after_score
   -> resolve_boundary
@@ -37,6 +40,7 @@ plan_direction
 - workspace 命名和配置落盘。
 - source 请求、缓存、分页、预算和日志。
 - `.raw/` 规范化、去重、metadata 合并。
+- BM25 deterministic prefilter 分区、topic/negative hit 诊断，并落盘 `data/prefilter_decisions.jsonl`。
 - review decision / override 应用。
 - catalog、QA、final summary。
 
@@ -74,6 +78,26 @@ workspaces/<topic_id>--<min_year>plus/
 uv run --no-sync papercompass brains list
 ```
 
+通用 Chat Completions 接口使用：
+
+```bash
+export PAPERCOMPASS_BRAIN_BASE_URL="https://provider.example/v1"
+export PAPERCOMPASS_BRAIN_API_KEY="..."
+export PAPERCOMPASS_BRAIN_MODEL="model-name"
+# 可选：json_object | json_schema | none；不兼容 response_format 的服务用 none。
+export PAPERCOMPASS_BRAIN_RESPONSE_FORMAT="json_object"
+# 可选：覆盖默认 max_tokens=8000。
+export PAPERCOMPASS_BRAIN_MAX_TOKENS="8000"
+# 可选：如果同名模型背后版本变化，把 revision 纳入 review cache key。
+export PAPERCOMPASS_BRAIN_MODEL_REVISION="provider-build-id"
+# 可选：按每百万 token 估算任意 OpenAI-compatible 服务成本。
+export PAPERCOMPASS_BRAIN_INPUT_PRICE_PER_MTOK="0"
+export PAPERCOMPASS_BRAIN_OUTPUT_PRICE_PER_MTOK="0"
+uv run --no-sync papercompass auto-build ... --brain openai_compatible
+```
+
+如果兼容服务不支持 `json_schema`，优先使用 `PAPERCOMPASS_BRAIN_RESPONSE_FORMAT=json_object`；如果仍报 response_format 相关错误，再降级为 `PAPERCOMPASS_BRAIN_RESPONSE_FORMAT=none`，由 PaperCompass 从普通文本中提取 JSON。
+
 可选的 `--second-brain` 只用于边界复核，不改变主流程。
 
 ## Embedding 要求
@@ -92,6 +116,7 @@ uv sync --extra embed
 uv run --no-sync papercompass auto-build \
   --direction "<research direction>" \
   --min-year 2022 \
+  --confirmed-token pcfm_xxx \
   --max-remote-calls 120 \
   --weak-batch-size 25 \
   --weak-max-batches 30 \
@@ -99,7 +124,11 @@ uv run --no-sync papercompass auto-build \
   -v
 ```
 
-- `--plan-only`：只写出方向计划、`topic.yaml`、`sources.yaml` 和可选 anchors。
+- `--plan-only`：会调用 brain 生成方向计划，并写出 `topic.yaml`、`sources.yaml` 和可选 anchors；不写 `.raw/data/catalog`。
+- `--prepare`：只生成确认 token，不调用 brain、不联网。
+- `--confirmed-token`：用户确认后传入；正式构建必填。
+- `--user-confirmed`：旧兼容开关，默认不生效；仅在设置 `PAPERCOMPASS_ALLOW_LEGACY_USER_CONFIRMED=1` 时可用。
+- `--original-query`：可选，把用户在对话中的原始请求原话写入 `topic.yaml.original_query`，用于后续溯源。
 - `--fresh`：复用旧 workspace 但清空旧运行产物。方向、年份或 source 变化时使用。
 - `--sources`：覆盖默认 source 列表。
 - `--anchor-cap`：限制 source-backed anchors 数量。

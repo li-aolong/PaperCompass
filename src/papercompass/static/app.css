@@ -222,7 +222,7 @@ select {
 
 .filter-bar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr)) auto;
+  grid-template-columns: repeat(5, minmax(118px, 1fr)) auto;
   gap: 10px;
   align-items: end;
 }
@@ -431,6 +431,36 @@ select {
   color: var(--accent);
 }
 
+.tag.role-core {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.tag.role-eval {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #a16207;
+}
+
+.tag.role-anchor {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.tag.role-negative {
+  border-color: #d1d5db;
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
+.tag.role,
+.tag.decision {
+  background: #eef2ff;
+  color: #4338ca;
+}
+
 .tag.source {
   background: var(--source-soft);
 }
@@ -453,6 +483,14 @@ select {
 
 .detail-body {
   padding: 20px;
+}
+
+.detail-role-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+  margin: 10px 0 8px;
 }
 
 .detail-kicker {

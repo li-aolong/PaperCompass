@@ -4,12 +4,15 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from papercompass.auto.orchestrator import _write_queue_gate_summary
 from papercompass.auto.state import AutoState
 from papercompass.build import add_manual_paper, build_workspace
 from papercompass.catalog import build_catalog
 from papercompass.config import load_topic_config, workspace_relative_path, write_yaml
 from papercompass.qa import build_quality_report
+from papercompass.text import read_json
 
 
 def _assert_no_workspace_absolute_path(path: Path, workspace: Path) -> None:
@@ -115,3 +118,46 @@ def test_workspace_relative_path_handles_synced_foreign_root(tmp_path: Path) -> 
         workspace_relative_path(workspace, old_wsl_path)
         == ".papercompass/auto/final_summary.json"
     )
+
+
+def test_catalog_build_restores_previous_catalog_when_swap_fails(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "catalog-swap--2022plus"
+    workspace.mkdir()
+    write_yaml(
+        workspace / "topic.yaml",
+        {
+            "topic_id": "catalog-swap",
+            "name": "Catalog swap",
+            "min_year": 2022,
+        },
+    )
+    write_yaml(workspace / "sources.yaml", {"sources": {}})
+    add_manual_paper(
+        workspace,
+        {
+            "title": "Stable Catalog Paper",
+            "year": 2024,
+            "abstract": "A test paper.",
+            "authors": "A. Researcher",
+        },
+    )
+    build_workspace(workspace)
+    build_catalog(workspace)
+    old_manifest = read_json(workspace / "catalog" / "manifest.json")
+    assert old_manifest["paper_count"] == 1
+
+    original_rename = Path.rename
+
+    def flaky_rename(self: Path, target: Path) -> Path:
+        target_path = Path(target)
+        if self.name.startswith(".catalog.tmp.") and target_path.name == "catalog":
+            raise OSError("simulated catalog swap failure")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+
+    with pytest.raises(OSError, match="simulated catalog swap failure"):
+        build_catalog(workspace)
+
+    restored_manifest = read_json(workspace / "catalog" / "manifest.json")
+    assert restored_manifest["paper_count"] == old_manifest["paper_count"]

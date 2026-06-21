@@ -12,7 +12,7 @@ from bs4.element import NavigableString, Tag
 
 from .catalog import resolve_pointer
 from .config import catalog_dir
-from .text import clean_text, read_json, write_json
+from .text import atomic_write_text, clean_text, read_json, write_json
 
 
 USER_AGENT = "papercompass-fulltext/0.1"
@@ -313,7 +313,7 @@ def write_fulltext_markdown(out_dir: Path, paper: dict[str, Any], source_url: st
         "",
     ]
     path = out_dir / "fulltext.md"
-    path.write_text(collapse_blank_lines("\n".join(header) + markdown), encoding="utf-8")
+    atomic_write_text(path, collapse_blank_lines("\n".join(header) + markdown))
     return path
 
 
