@@ -197,5 +197,5 @@ PaperCompass 是一个 Local-first (本地优先) 的工具。所有的 Workspac
 
 ---
 <div align="center">
-Made with ❤️ for AI Researchers & Agents
+Made with ❤️ for AI Researchers and Agents
 </div>
