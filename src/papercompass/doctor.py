@@ -171,6 +171,8 @@ def _is_bad_archive_entry(name: str) -> bool:
 
 def _is_unsafe_archive_path(name: str) -> bool:
     normalized = name.replace("\\", "/")
+    if normalized.startswith("/"):
+        return True
     path = Path(normalized)
     if not normalized or path.is_absolute():
         return True

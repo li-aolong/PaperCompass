@@ -82,7 +82,8 @@ def workspace_relative_path(workspace: Path, path: Path | str | None) -> str:
         return ""
     text = str(path)
     candidate = Path(text).expanduser()
-    if not candidate.is_absolute():
+    is_abs = candidate.is_absolute() or text.startswith(("/", "\\"))
+    if not is_abs:
         return candidate.as_posix() if isinstance(path, Path) else text
     try:
         workspace_root = workspace.expanduser().resolve()
