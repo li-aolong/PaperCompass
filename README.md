@@ -68,7 +68,7 @@ git pull && uv sync --extra embed
 
 ### 2. 配置说明 (重要：OpenAlex / Brain 访问配置)
 
-本项目在文献检索阶段会使用 [OpenAlex](https://openalex.org) 服务。匿名或未认证访问在集中建库时更容易遇到 403/429、限速或配额问题，建议配置 API Key；如果暂时没有 Key，至少配置 `OPENALEX_EMAIL` 以便按 OpenAlex 的礼貌访问机制发起请求。
+本项目在文献检索阶段会使用 [OpenAlex](https://openalex.org) 服务。匿名或未认证访问在集中建库时更容易遇到 403/429、限速或配额问题，建议配置 API Key（可前往 [OpenAlex Settings](https://openalex.org/settings/api-key) 获取）；如果暂时没有 Key，至少配置 `OPENALEX_EMAIL` 以便按 OpenAlex 的礼貌访问机制发起请求。
 
 *   **推荐配置方式**：
     *   **方法一（推荐，全局环境变量）**：在系统 shell 中配置 API Key：

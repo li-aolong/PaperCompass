@@ -55,7 +55,7 @@
 🚨 **OpenAlex 访问配置检查与阻断机制（极重要）**：
 1. **主动检查**：在输出建库确认信前，检查系统环境变量中是否配置了 `OPENALEX_API_KEY` 或 `OPENALEX_EMAIL`，或 Workspace 的 `sources.yaml` 中是否填入了 `api_key` / `mailto`。
 2. **阻断提示**：如果**未检测到** OpenAlex API Key 或邮箱，你**必须**在确认信下方追加以下提示，并**暂停执行**：
-   > 💡 **温馨提示**：检测到您当前未配置 OpenAlex API Key 或联系邮箱。匿名访问在集中建库时更容易遇到 403/429、限速或配额问题，可能导致召回不完整。
+   > 💡 **温馨提示**：检测到您当前未配置 OpenAlex API Key 或联系邮箱。匿名访问在集中建库时更容易遇到 403/429、限速或配额问题（可前往 [OpenAlex Settings](https://openalex.org/settings/api-key) 获取 Key），可能导致召回不完整。
    > **建议配置方式**：
    > 1. 在 shell 环境中执行 `export OPENALEX_API_KEY="your_api_key_here"`；或
    > 2. 至少执行 `export OPENALEX_EMAIL="you@example.com"`；或
